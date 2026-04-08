@@ -1,0 +1,5 @@
+run = "python main.py"
+language = "python3"
+
+[deployment]
+run = "python main.py"
