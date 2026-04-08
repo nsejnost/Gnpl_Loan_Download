@@ -31,6 +31,8 @@ if [ -f gnma_mf_raw_data.csv ]; then
 
     echo ""
     echo "[git] Pushing CSV to GitHub..."
+    git config user.email "nsejnost@gmail.com"
+    git config user.name "nsejnost"
     git add gnma_mf_raw_data.csv
     git commit -m "Update raw data $(date +%Y-%m-%d)" || true
     git push || echo "[git] Push failed — check git credentials"
