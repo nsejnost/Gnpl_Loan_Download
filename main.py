@@ -134,6 +134,7 @@ def discover_nix_libs():
         ('freetype-2', 'libfreetype.so.6'),
         ('dbus-1', 'libdbus-1.so.3'),
         ('atk-2', 'libatk-1.0.so.0'),
+        ('alsa-lib-1', 'libasound.so.2'),
     ]
 
     for pkg_substr, lib_file in targets:
@@ -182,7 +183,15 @@ def authenticate_gnma(email, answer):
 
     print("\n[auth] Launching Firefox...")
     pw = sync_playwright().start()
-    browser = pw.firefox.launch(headless=True)
+
+    # Replit containers don't support user namespaces, so disable Firefox sandbox
+    os.environ['MOZ_DISABLE_CONTENT_SANDBOX'] = '1'
+    browser = pw.firefox.launch(
+        headless=True,
+        firefox_user_prefs={
+            'security.sandbox.content.level': 0,
+        },
+    )
     ctx = browser.new_context(user_agent=UA, accept_downloads=True)
     page = ctx.new_page()
 
