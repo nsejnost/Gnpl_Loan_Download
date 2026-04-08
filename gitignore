@@ -1,0 +1,11 @@
+gnma_mf_data/
+*.xlsx
+*.png
+gnma_debug.png
+step1.png
+step2.png
+__pycache__/
+*.pyc
+.pythonlibs/
+.upm/
+.cache/
