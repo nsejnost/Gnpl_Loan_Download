@@ -1,5 +1,2 @@
-run = "python main.py"
+run = "python3 main.py"
 language = "python3"
-
-[deployment]
-run = "python main.py"
