@@ -5,16 +5,10 @@ Authenticates with GNMA Disclosure Data Download using Firefox (Playwright),
 downloads mfplmon3 monthly portfolio files, tracks loans across months,
 identifies prepayments, and builds an S-curve panel dataset in Excel.
 
-Setup (Replit):
-  pip install requests beautifulsoup4 pandas openpyxl lxml playwright
-  playwright install firefox
-  nix-env -iA nixpkgs.fontconfig   # if fontconfig missing
-  export LD_LIBRARY_PATH=<fontconfig-lib-path>:<user-environment-lib-path>
-
 Usage:
-  python3 main.py --email you@email.com --answer "YourAnswer"
-  python3 main.py --email you@email.com --answer "YourAnswer" --months 12
-  python3 main.py --skip-download           # parse existing files only
+  bash run.sh --email you@email.com --answer "YourAnswer"
+  bash run.sh --email you@email.com --answer "YourAnswer" --months 12
+  bash run.sh --skip-download
   python3 main.py --skip-download --data-dir ./my_files
 """
 
@@ -33,14 +27,9 @@ try:
     import requests
     import pandas as pd
     import numpy as np
-    from openpyxl import load_workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
 except ImportError as e:
-    print(f"Missing dependency: {e}")
-    print("Install with: pip install requests pandas openpyxl lxml numpy")
+    print(f"Missing: {e}\nInstall: pip install requests pandas numpy openpyxl")
     sys.exit(1)
-
 
 # ─── CONFIGURATION ────────────────────────────────────────
 BASE_URL = "https://www.ginniemae.gov"
@@ -61,7 +50,6 @@ POOL_TYPE_NAMES = {
 }
 SCURVE_POOL_TYPES = {'PL', 'PN', 'LM', 'LS', 'RX'}
 
-# mfplmon3 V3.3 pipe-delimited field indices
 P = {
     'cusip': 0, 'pool_number': 1, 'pool_indicator': 2, 'pool_type': 3,
     'security_rate': 4, 'issue_date': 5, 'maturity_date': 6, 'orig_agg_amount': 7,
@@ -93,7 +81,6 @@ L = {
     'as_of_date': 72, 'green_status': 73, 'affordable_status': 74,
 }
 
-# GNMA profile page form field IDs (discovered via Playwright inspection)
 GNMA_EMAIL_SELECTOR = 'input[name*="tbemailaddress" i]'
 GNMA_ANSWER_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_tbAnswer'
 GNMA_ANSWER_SUBMIT_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_btnAnswerSecret'
@@ -104,34 +91,25 @@ GNMA_ANSWER_SUBMIT_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl
 # ═══════════════════════════════════════════════════════════
 
 def ensure_playwright():
-    """Auto-install playwright and Firefox if not present."""
     try:
         from playwright.sync_api import sync_playwright
         return True
     except ImportError:
         print("\n[setup] Installing playwright...")
         try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "playwright"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.check_call(
-                [sys.executable, "-m", "playwright", "install", "firefox"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call([sys.executable, "-m", "playwright", "install", "firefox"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             from playwright.sync_api import sync_playwright
-            print("[setup] ok Playwright + Firefox installed")
+            print("[setup] ok Installed")
             return True
         except Exception as e:
-            print(f"[setup] x Install failed: {e}")
-            print("  Manual: pip install playwright && python3 -m playwright install firefox")
+            print(f"[setup] x Failed: {e}")
             return False
 
 
 def authenticate_gnma(email, answer):
-    """
-    Authenticate with GNMA using Firefox (Playwright).
-    Two-step flow: email -> submit -> security answer -> submit.
-    Returns a requests.Session with auth cookies, or None on failure.
-    """
     from playwright.sync_api import sync_playwright
 
     print("\n[auth] Launching Firefox...")
@@ -141,43 +119,38 @@ def authenticate_gnma(email, answer):
     page = ctx.new_page()
 
     try:
-        # Step 1: Navigate to download page (redirects to profile)
+        # Step 1: Navigate
         print("[auth] Step 1: Loading GNMA profile page...")
         page.goto(DOWNLOAD_PAGE, wait_until="networkidle", timeout=60000)
         time.sleep(3)
 
         if "profile" not in page.url.lower():
-            print("[auth] ok No auth needed — already on download page")
+            print("[auth] ok Already authenticated")
         else:
-            # Step 2: Fill email and submit
+            # Step 2: Email
             print("[auth] Step 2: Submitting email...")
             try:
                 page.fill(GNMA_EMAIL_SELECTOR, email)
             except Exception:
-                # Fallback: find first visible text input
                 inputs = page.query_selector_all('input[type="text"]')
                 for inp in inputs:
                     if inp.is_visible():
                         inp.fill(email)
                         break
-
-            # Click first visible submit button
             for sel in ['input[type="submit"]', 'button[type="submit"]']:
                 btn = page.query_selector(sel)
                 if btn and btn.is_visible():
                     btn.click()
                     break
-
             page.wait_for_load_state("networkidle", timeout=30000)
             time.sleep(3)
 
-            # Step 3: Fill security answer and submit
+            # Step 3: Security answer
             print("[auth] Step 3: Submitting security answer...")
             try:
                 page.fill(GNMA_ANSWER_ID, answer)
                 page.click(GNMA_ANSWER_SUBMIT_ID)
             except Exception:
-                # Fallback: look for answer field by name pattern
                 answer_el = page.query_selector('input[name*="Answer" i]') or \
                             page.query_selector('input[name*="answer" i]')
                 if answer_el:
@@ -186,56 +159,42 @@ def authenticate_gnma(email, answer):
                             page.query_selector('input[type="submit"]')
                 if submit_el and submit_el.is_visible():
                     submit_el.click()
-
             page.wait_for_load_state("networkidle", timeout=30000)
             time.sleep(5)
 
-        # Verify
         if "profile" in page.url.lower():
-            # One more try: navigate to download page
             page.goto(DOWNLOAD_PAGE, wait_until="networkidle", timeout=30000)
             time.sleep(3)
 
         if "profile" in page.url.lower():
             print("[auth] x Authentication failed")
             page.screenshot(path=os.path.join(SCRIPT_DIR, "gnma_debug.png"), full_page=True)
-            print(f"[auth] Debug screenshot saved: {os.path.join(SCRIPT_DIR, 'gnma_debug.png')}")
-            browser.close()
-            pw.stop()
+            browser.close(); pw.stop()
             return None
 
         print("[auth] ok Authentication successful!")
-        print(f"[auth] URL: {page.url}")
 
-        # Transfer cookies to requests session for fast bulk downloads
+        # Transfer cookies to requests
         session = requests.Session()
         for cookie in ctx.cookies():
-            session.cookies.set(
-                cookie['name'], cookie['value'],
-                domain=cookie.get('domain', ''),
-                path=cookie.get('path', '/'))
+            session.cookies.set(cookie['name'], cookie['value'],
+                                domain=cookie.get('domain', ''), path=cookie.get('path', '/'))
         session.headers.update({"User-Agent": UA})
-
-        browser.close()
-        pw.stop()
+        browser.close(); pw.stop()
         return session
 
     except Exception as e:
         print(f"[auth] x Error: {e}")
-        try:
-            page.screenshot(path=os.path.join(SCRIPT_DIR, "gnma_debug.png"), full_page=True)
-        except:
-            pass
-        browser.close()
-        pw.stop()
+        try: page.screenshot(path=os.path.join(SCRIPT_DIR, "gnma_debug.png"), full_page=True)
+        except: pass
+        browser.close(); pw.stop()
         return None
 
 
 def get_file_list(months=6):
-    """Generate list of mfplmon3 files for the last N months."""
     now = datetime.now()
     files = []
-    for i in range(months + 2):  # Buffer for delayed releases
+    for i in range(months + 2):
         dt = now - timedelta(days=30 * (i + 1))
         period = dt.strftime("%Y%m")
         fn = f"mfplmon3_{period}.zip"
@@ -245,69 +204,43 @@ def get_file_list(months=6):
 
 
 def download_files(session, months=6):
-    """Download mfplmon3 files using authenticated session."""
     os.makedirs(DATA_DIR, exist_ok=True)
     files = get_file_list(months)
     print(f"\n[download] Downloading {len(files)} files to {DATA_DIR}\n")
-
     downloaded = 0
     for f in files:
         dest = os.path.join(DATA_DIR, f["filename"])
-
-        # Skip if already cached
         if os.path.exists(dest) and os.path.getsize(dest) > 1000:
             print(f"  ok {f['filename']} (cached, {os.path.getsize(dest)//1024} KB)")
-            downloaded += 1
-            continue
-
+            downloaded += 1; continue
         try:
             r = session.get(f["url"], timeout=120, stream=True, allow_redirects=True)
-
-            # Check for auth redirect
             if "profile" in r.url.lower():
-                print(f"  x {f['filename']} — session expired")
-                continue
-
+                print(f"  x {f['filename']} — session expired"); continue
             ct = r.headers.get("Content-Type", "")
-            if "text/html" in ct:
-                snippet = r.text[:500].lower() if hasattr(r, 'text') else ""
-                if "profile" in snippet or "sign in" in snippet:
-                    print(f"  x {f['filename']} — redirected to login")
-                    continue
-
+            if "text/html" in ct and "profile" in (r.text[:500] if hasattr(r,'text') else "").lower():
+                print(f"  x {f['filename']} — login redirect"); continue
             if r.status_code != 200:
-                print(f"  x {f['filename']} — HTTP {r.status_code}")
-                continue
-
-            # Download with progress
+                print(f"  x {f['filename']} — HTTP {r.status_code}"); continue
             total = int(r.headers.get("Content-Length", 0))
             dl = 0
             with open(dest, "wb") as out:
                 for chunk in r.iter_content(65536):
-                    out.write(chunk)
-                    dl += len(chunk)
+                    out.write(chunk); dl += len(chunk)
                     if total:
                         print(f"\r  > {f['filename']} {dl//1024}/{total//1024} KB ({dl*100//total}%)",
                               end="", flush=True)
-
             sz = os.path.getsize(dest)
-
-            # Verify it's actually a zip, not an HTML error page
             if sz < 1000:
-                with open(dest, 'r', errors='replace') as check:
-                    if 'html' in check.read(300).lower():
+                with open(dest, 'r', errors='replace') as chk:
+                    if 'html' in chk.read(300).lower():
                         os.remove(dest)
-                        print(f"\r  x {f['filename']} — was HTML error page" + " " * 20)
-                        continue
-
-            print(f"\r  ok {f['filename']} — {sz//1024} KB" + " " * 20)
+                        print(f"\r  x {f['filename']} — was HTML" + " "*20); continue
+            print(f"\r  ok {f['filename']} — {sz//1024} KB" + " "*20)
             downloaded += 1
-
         except requests.RequestException as e:
             print(f"  x {f['filename']} — {e}")
-
-        time.sleep(1)  # Be nice to the server
-
+        time.sleep(1)
     print(f"\n[download] {downloaded}/{len(files)} files downloaded")
     return downloaded
 
@@ -337,9 +270,7 @@ def mb(d1, d2):
     if pd.isna(d1) or pd.isna(d2): return np.nan
     return (d2.year - d1.year) * 12 + (d2.month - d1.month)
 
-
 def read_mfplmon3(filepath):
-    """Parse mfplmon3 file (.zip or .txt)."""
     text = None
     if filepath.endswith('.zip'):
         try:
@@ -352,13 +283,11 @@ def read_mfplmon3(filepath):
                 if text is None and zf.namelist():
                     with zf.open(zf.namelist()[0]) as f:
                         text = f.read().decode('utf-8', errors='replace')
-        except zipfile.BadZipFile:
-            return []
+        except zipfile.BadZipFile: return []
     else:
         with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             text = f.read()
-    if not text:
-        return []
+    if not text: return []
 
     records = []
     for line in text.split('\n'):
@@ -367,23 +296,18 @@ def read_mfplmon3(filepath):
         cusip = flds[0].strip()
         if not cusip or len(cusip) != 9 or not cusip[0].isdigit(): continue
         pt = flds[P['pool_type']].strip()
-
-        def g(idx):
-            return flds[idx].strip() if len(flds) > idx else ''
-
+        def g(idx): return flds[idx].strip() if len(flds) > idx else ''
         rec = {
             'pool_cusip': cusip, 'pool_number': g(P['pool_number']),
             'pool_type': pt, 'pool_type_name': POOL_TYPE_NAMES.get(pt, pt),
             'security_rate': sf(g(P['security_rate'])),
-            'issue_date': g(P['issue_date']),
-            'pool_maturity_date': g(P['maturity_date']),
+            'issue_date': g(P['issue_date']), 'pool_maturity_date': g(P['maturity_date']),
             'orig_agg_amount': sf(g(P['orig_agg_amount'])),
             'issuer_number': g(P['issuer_number']), 'issuer_name': g(P['issuer_name']),
             'pool_upb': sf(g(P['pool_upb'])),
             'security_rpb': sf(g(P['security_rpb'])),
             'rpb_factor': sf(g(P['rpb_factor'])),
         }
-
         if len(flds) > L['case_number']:
             case = g(L['case_number'])
             rec.update({
@@ -436,91 +360,75 @@ def build_panel(monthly_data):
     periods = sorted(monthly_data.keys())
     print(f"\n[panel] Building: {len(periods)} periods, "
           f"{sum(len(v) for v in monthly_data.values())} total records")
-
     pmap = {p: {r['loan_id']: r for r in recs} for p, recs in monthly_data.items()}
     rows = []
-
     for i, period in enumerate(periods):
-        nxt = periods[i + 1] if i + 1 < len(periods) else None
+        nxt = periods[i+1] if i+1 < len(periods) else None
         nl = pmap.get(nxt, {}) if nxt else {}
         od = pd_(period)
-
         for lid, r in pmap[period].items():
-            if r['pool_type'] not in SCURVE_POOL_TYPES:
-                continue
-
-            rm = r.get('removal_reason', '').strip()
-            iv = rm == '1'
-            ii = rm in ('2', '3', '4', '6')
+            if r['pool_type'] not in SCURVE_POOL_TYPES: continue
+            rm = r.get('removal_reason','').strip()
+            iv = rm == '1'; ii = rm in ('2','3','4','6')
             dis = nxt is not None and lid not in nl
-            mdq = r.get('months_dq', 0) or 0
+            mdq = r.get('months_dq',0) or 0
             if dis and not iv and not ii:
-                iv = mdq == 0
-                ii = mdq > 0
-
-            fp = pd_(r.get('first_pay_date', ''))
-            lm = pd_(r.get('loan_maturity_date', ''))
-            le = pd_(r.get('lockout_end_date', ''))
-            pe = pd_(r.get('prepay_end_date', ''))
-            age = mb(fp, od)
-            rem = mb(od, lm)
+                iv = mdq == 0; ii = mdq > 0
+            fp = pd_(r.get('first_pay_date','')); lm = pd_(r.get('loan_maturity_date',''))
+            le = pd_(r.get('lockout_end_date','')); pe = pd_(r.get('prepay_end_date',''))
+            age = mb(fp, od); rem = mb(od, lm)
             il = 1 if pd.notna(le) and od < le else 0
             ip = 1 if pd.notna(pe) and od < pe else 0
             pa = 1 if not il and not ip else 0
-            lr = r.get('loan_rate', np.nan)
-            sr = r.get('security_rate', np.nan)
-
+            lr = r.get('loan_rate', np.nan); sr = r.get('security_rate', np.nan)
             smm = np.nan
             if nxt and lid in nl:
-                cu = r.get('upb', np.nan)
-                nu = nl[lid].get('upb', np.nan)
-                if pd.notna(cu) and pd.notna(nu) and cu > 0:
-                    smm = 1 - (nu / cu)
-
+                cu = r.get('upb', np.nan); nu = nl[lid].get('upb', np.nan)
+                if pd.notna(cu) and pd.notna(nu) and cu > 0: smm = 1-(nu/cu)
             rows.append({
                 'period': period, 'obs_date': od, 'loan_id': lid,
                 'pool_cusip': r['pool_cusip'], 'pool_number': r['pool_number'],
-                'pool_type': r['pool_type'], 'case_number': r.get('case_number', ''),
-                'agency_type': r.get('agency_type', ''),
-                'fha_program_code': r.get('fha_program_code', ''),
+                'pool_type': r['pool_type'], 'case_number': r.get('case_number',''),
+                'agency_type': r.get('agency_type',''),
+                'fha_program_code': r.get('fha_program_code',''),
                 'loan_rate': lr, 'security_rate': sr,
-                'servicing_spread': (lr - sr) if pd.notna(lr) and pd.notna(sr) else np.nan,
+                'servicing_spread': (lr-sr) if pd.notna(lr) and pd.notna(sr) else np.nan,
                 'benchmark_rate': np.nan, 'refi_incentive_bps': np.nan,
                 'orig_prin_bal': r.get('orig_prin_bal', np.nan),
                 'upb_at_issuance': r.get('upb_at_issuance', np.nan),
                 'current_upb': r.get('upb', np.nan),
                 'pool_security_rpb': r.get('security_rpb', np.nan),
                 'rpb_factor': r.get('rpb_factor', np.nan),
-                'origination_date': r.get('origination_date', ''),
-                'first_pay_date': r.get('first_pay_date', ''),
-                'loan_maturity_date': r.get('loan_maturity_date', ''),
+                'origination_date': r.get('origination_date',''),
+                'first_pay_date': r.get('first_pay_date',''),
+                'loan_maturity_date': r.get('loan_maturity_date',''),
                 'loan_term_months': r.get('loan_term', 0),
                 'age_months': age, 'remaining_term_months': rem,
                 'lockout_term_yrs': r.get('lockout_term_yrs', 0),
-                'lockout_end_date': r.get('lockout_end_date', ''),
+                'lockout_end_date': r.get('lockout_end_date',''),
                 'prepay_premium_period_yrs': r.get('prepay_premium_period_yrs', 0),
-                'prepay_end_date': r.get('prepay_end_date', ''),
-                'prepay_penalty_flag': r.get('prepay_penalty_flag', ''),
-                'prepay_desc': r.get('prepay_desc', ''),
+                'prepay_end_date': r.get('prepay_end_date',''),
+                'prepay_penalty_flag': r.get('prepay_penalty_flag',''),
+                'prepay_desc': r.get('prepay_desc',''),
                 'in_lockout': il, 'in_prepay_penalty': ip, 'past_all_restrictions': pa,
-                'months_to_lockout_end': max(0, mb(od, le) or 0) if pd.notna(le) and od < le else 0,
-                'months_to_prepay_end': max(0, mb(od, pe) or 0) if pd.notna(pe) and od < pe else 0,
+                'months_to_lockout_end': max(0, mb(od,le) or 0) if pd.notna(le) and od<le else 0,
+                'months_to_prepay_end': max(0, mb(od,pe) or 0) if pd.notna(pe) and od<pe else 0,
                 'prepaid_voluntary': 1 if iv else 0,
                 'prepaid_involuntary': 1 if ii else 0,
                 'prepaid_any': 1 if iv or ii else 0,
-                'removal_reason': rm, 'liquidation_flag': r.get('liquidation_flag', ''),
-                'months_dq': mdq, 'modified_ind': r.get('modified_ind', ''),
-                'insurance_type': r.get('insurance_type', ''),
-                'property_name': r.get('property_name', ''),
-                'property_state': r.get('property_state', ''),
-                'property_city': r.get('property_city', ''),
-                'msa': r.get('msa', ''), 'num_units': r.get('num_units', 0),
-                'green_status': r.get('green_status', ''),
-                'affordable_status': r.get('affordable_status', ''),
-                'non_level_ind': r.get('non_level_ind', ''),
-                'mature_loan_flag': r.get('mature_loan_flag', ''),
-                'issuer_number': r.get('issuer_number', ''),
-                'issuer_name': r.get('issuer_name', ''),
+                'removal_reason': rm, 'liquidation_flag': r.get('liquidation_flag',''),
+                'months_dq': mdq, 'modified_ind': r.get('modified_ind',''),
+                'insurance_type': r.get('insurance_type',''),
+                'property_name': r.get('property_name',''),
+                'property_state': r.get('property_state',''),
+                'property_city': r.get('property_city',''),
+                'msa': r.get('msa',''), 'num_units': r.get('num_units', 0),
+                'green_status': r.get('green_status',''),
+                'affordable_status': r.get('affordable_status',''),
+                'non_level_ind': r.get('non_level_ind',''),
+                'mature_loan_flag': r.get('mature_loan_flag',''),
+                'issuer_number': r.get('issuer_number',''),
+                'issuer_name': r.get('issuer_name',''),
                 'smm_approx': smm,
             })
     return pd.DataFrame(rows)
@@ -529,160 +437,125 @@ def build_panel(monthly_data):
 def build_summary(df):
     rows = []
     for period in sorted(df['period'].unique()):
-        p = df[df['period'] == period]
-        n = len(p)
-        upb = p['current_upb'].sum()
-        vol = p['prepaid_voluntary'].sum()
+        p = df[df['period']==period]; n = len(p)
+        upb = p['current_upb'].sum(); vol = p['prepaid_voluntary'].sum()
         inv = p['prepaid_involuntary'].sum()
-        wr = np.average(
-            p['loan_rate'].dropna(),
-            weights=p.loc[p['loan_rate'].notna(), 'current_upb'].clip(lower=.01)
+        wr = np.average(p['loan_rate'].dropna(),
+            weights=p.loc[p['loan_rate'].notna(),'current_upb'].clip(lower=.01)
         ) if p['loan_rate'].notna().any() else np.nan
-        wa = np.average(
-            p['age_months'].dropna(),
-            weights=p.loc[p['age_months'].notna(), 'current_upb'].clip(lower=.01)
+        wa = np.average(p['age_months'].dropna(),
+            weights=p.loc[p['age_months'].notna(),'current_upb'].clip(lower=.01)
         ) if p['age_months'].notna().any() else np.nan
         rows.append({
-            'Period': period, 'Loans': n, 'UPB ($M)': upb / 1e6,
+            'Period': period, 'Loans': n, 'UPB ($M)': upb/1e6,
             'Vol': int(vol), 'Invol': int(inv),
-            'CPR (ann %)': (1 - (1 - vol / max(n, 1)) ** 12) * 100,
+            'CPR (ann %)': (1-(1-vol/max(n,1))**12)*100,
             'WA Rate': wr, 'WA Age': wa,
-            '% Lock': p['in_lockout'].mean() * 100,
-            '% Pen': p['in_prepay_penalty'].mean() * 100,
-            '% Open': p['past_all_restrictions'].mean() * 100,
+            '% Lock': p['in_lockout'].mean()*100,
+            '% Pen': p['in_prepay_penalty'].mean()*100,
+            '% Open': p['past_all_restrictions'].mean()*100,
         })
     return pd.DataFrame(rows)
 
 
 def build_scurve_buckets(df):
     d = df[df['loan_rate'].notna()].copy()
-    d['b'] = (d['loan_rate'] * 4).round() / 4
+    d['b'] = (d['loan_rate']*4).round()/4
     g = d.groupby('b').agg(
-        n=('loan_id', 'count'), upb=('current_upb', 'sum'),
-        pp=('prepaid_voluntary', 'sum'), age=('age_months', 'mean'),
-        lk=('in_lockout', 'mean'), op=('past_all_restrictions', 'mean'),
+        n=('loan_id','count'), upb=('current_upb','sum'),
+        pp=('prepaid_voluntary','sum'), age=('age_months','mean'),
+        lk=('in_lockout','mean'), op=('past_all_restrictions','mean'),
     ).reset_index()
-    g['smm'] = g['pp'] / g['n'].clip(lower=1)
-    g['cpr'] = (1 - (1 - g['smm']) ** 12) * 100
-    g['upb'] /= 1e6
-    g['lk'] *= 100
-    g['op'] *= 100
+    g['smm'] = g['pp']/g['n'].clip(lower=1)
+    g['cpr'] = (1-(1-g['smm'])**12)*100
+    g['upb'] /= 1e6; g['lk'] *= 100; g['op'] *= 100
     return g.rename(columns={
-        'b': 'Rate (%)', 'n': 'Loans', 'upb': 'UPB ($M)',
-        'pp': 'Prepaid', 'age': 'WA Age', 'lk': '% Locked', 'op': '% Open',
-        'smm': 'SMM', 'cpr': 'CPR (ann %)',
-    })[['Rate (%)', 'Loans', 'UPB ($M)', 'Prepaid', 'SMM',
-        'CPR (ann %)', 'WA Age', '% Locked', '% Open']].sort_values('Rate (%)')
+        'b':'Rate (%)','n':'Loans','upb':'UPB ($M)','pp':'Prepaid',
+        'age':'WA Age','lk':'% Locked','op':'% Open','smm':'SMM','cpr':'CPR (ann %)',
+    })[['Rate (%)','Loans','UPB ($M)','Prepaid','SMM','CPR (ann %)','WA Age','% Locked','% Open']].sort_values('Rate (%)')
 
 
 def build_lockout(df):
-    cats = [
-        ('In Lockout', df[df['in_lockout'] == 1]),
-        ('In Penalty', df[(df['in_lockout'] == 0) & (df['in_prepay_penalty'] == 1)]),
-        ('Open', df[df['past_all_restrictions'] == 1]),
-    ]
+    cats = [('In Lockout', df[df['in_lockout']==1]),
+            ('In Penalty', df[(df['in_lockout']==0)&(df['in_prepay_penalty']==1)]),
+            ('Open', df[df['past_all_restrictions']==1])]
     rows = []
     for lbl, sub in cats:
         n = len(sub)
         if n == 0: continue
         rows.append({
-            'Category': lbl, 'Loans': n, 'UPB ($M)': sub['current_upb'].sum() / 1e6,
+            'Category': lbl, 'Loans': n, 'UPB ($M)': sub['current_upb'].sum()/1e6,
             'Vol': int(sub['prepaid_voluntary'].sum()),
-            'SMM': sub['prepaid_voluntary'].sum() / max(n, 1),
-            'CPR (ann %)': (1 - (1 - sub['prepaid_voluntary'].sum() / max(n, 1)) ** 12) * 100,
-            'WA Rate': np.average(
-                sub['loan_rate'].dropna(),
-                weights=sub.loc[sub['loan_rate'].notna(), 'current_upb'].clip(lower=.01)
+            'SMM': sub['prepaid_voluntary'].sum()/max(n,1),
+            'CPR (ann %)': (1-(1-sub['prepaid_voluntary'].sum()/max(n,1))**12)*100,
+            'WA Rate': np.average(sub['loan_rate'].dropna(),
+                weights=sub.loc[sub['loan_rate'].notna(),'current_upb'].clip(lower=.01)
             ) if sub['loan_rate'].notna().any() else np.nan,
             'WA Age': sub['age_months'].mean(),
         })
     return pd.DataFrame(rows)
 
 
-def fmt_wb(wb):
-    hf = Font(name='Arial', bold=True, size=10, color='FFFFFF')
-    hfill = PatternFill('solid', fgColor='1E3A5F')
-    for ws in wb.worksheets:
-        for c in ws[1]:
-            c.font = hf
-            c.fill = hfill
-            c.alignment = Alignment(horizontal='center', wrap_text=True)
-        for row in ws.iter_rows(min_row=2):
-            for c in row:
-                c.font = Font(name='Arial', size=9)
-                c.border = Border(bottom=Side('thin', color='D0D0D0'))
-        for col in range(1, ws.max_column + 1):
-            mx = max(
-                (len(str(ws.cell(r, col).value or ''))
-                 for r in range(1, min(ws.max_row + 1, 50))),
-                default=8)
-            ws.column_dimensions[get_column_letter(col)].width = min(mx + 3, 25)
-        ws.freeze_panes = 'A2'
-        ws.auto_filter.ref = ws.dimensions
-
-
 def write_output(df, monthly_data):
+    """Write Excel output using only pandas ExcelWriter (no load_workbook).
+    This avoids the XML/expat conflict on Replit."""
     print(f"\n[output] Writing {OUTPUT_FILE}...")
+
     pcols = [
-        'period', 'loan_id', 'pool_cusip', 'pool_number', 'pool_type',
-        'case_number', 'fha_program_code', 'agency_type',
-        'loan_rate', 'security_rate', 'servicing_spread',
-        'benchmark_rate', 'refi_incentive_bps',
-        'current_upb', 'orig_prin_bal', 'rpb_factor',
-        'age_months', 'remaining_term_months', 'loan_term_months',
-        'in_lockout', 'in_prepay_penalty', 'past_all_restrictions',
-        'months_to_lockout_end', 'months_to_prepay_end',
-        'lockout_end_date', 'prepay_end_date', 'prepay_desc',
-        'prepaid_voluntary', 'prepaid_involuntary', 'prepaid_any',
-        'removal_reason', 'months_dq', 'modified_ind',
-        'property_state', 'num_units', 'green_status', 'affordable_status',
-        'issuer_name', 'smm_approx',
+        'period','loan_id','pool_cusip','pool_number','pool_type',
+        'case_number','fha_program_code','agency_type',
+        'loan_rate','security_rate','servicing_spread',
+        'benchmark_rate','refi_incentive_bps',
+        'current_upb','orig_prin_bal','rpb_factor',
+        'age_months','remaining_term_months','loan_term_months',
+        'in_lockout','in_prepay_penalty','past_all_restrictions',
+        'months_to_lockout_end','months_to_prepay_end',
+        'lockout_end_date','prepay_end_date','prepay_desc',
+        'prepaid_voluntary','prepaid_involuntary','prepaid_any',
+        'removal_reason','months_dq','modified_ind',
+        'property_state','num_units','green_status','affordable_status',
+        'issuer_name','smm_approx',
     ]
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as w:
-        build_summary(df).to_excel(w, sheet_name='Summary', index=False)
-        build_scurve_buckets(df).to_excel(w, sheet_name='S-Curve Buckets', index=False)
-        build_lockout(df).to_excel(w, sheet_name='Lockout Analysis', index=False)
-        df[pcols].to_excel(w, sheet_name='Loan Panel', index=False)
-        df.to_excel(w, sheet_name='Full Detail', index=False)
+    # Build instructions as a DataFrame
+    instr_rows = [
+        {'A': 'GNMA MF Prepayment S-Curve Dataset', 'B': ''},
+        {'A': '', 'B': ''},
+        {'A': 'Generated', 'B': datetime.now().strftime('%Y-%m-%d %H:%M')},
+        {'A': 'Periods', 'B': ', '.join(sorted(monthly_data.keys()))},
+        {'A': 'Observations', 'B': str(len(df))},
+        {'A': 'Unique Loans', 'B': str(df['loan_id'].nunique())},
+        {'A': 'Vol Prepays', 'B': str(int(df['prepaid_voluntary'].sum()))},
+        {'A': '', 'B': ''},
+        {'A': 'TO COMPLETE S-CURVE:', 'B': ''},
+        {'A': '1.', 'B': 'Fill benchmark_rate column with prevailing GNMA MF coupon for each period'},
+        {'A': '2.', 'B': 'Compute: refi_incentive_bps = (loan_rate - benchmark_rate) * 10000'},
+        {'A': '3.', 'B': 'Re-bucket by incentive for the final S-curve shape'},
+        {'A': '4.', 'B': 'Fit: P(prepay) = f(incentive, age, lockout, penalty, loan_size, ...)'},
+        {'A': '', 'B': ''},
+        {'A': 'PREPAYMENT FLAGS:', 'B': ''},
+        {'A': 'prepaid_voluntary=1', 'B': 'Mortgagor payoff or loan disappears while current'},
+        {'A': 'prepaid_involuntary=1', 'B': 'Repurchase/foreclosure or disappears while delinquent'},
+        {'A': 'Note', 'B': 'Construction loans (CL/CS) excluded from panel'},
+    ]
+    instr_df = pd.DataFrame(instr_rows)
 
-    wb = load_workbook(OUTPUT_FILE)
-    fmt_wb(wb)
+    # Write all tabs using pandas only (no load_workbook)
+    with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+        instr_df.to_excel(writer, sheet_name='Instructions', index=False, header=False)
+        build_summary(df).to_excel(writer, sheet_name='Summary', index=False)
+        build_scurve_buckets(df).to_excel(writer, sheet_name='S-Curve Buckets', index=False)
+        build_lockout(df).to_excel(writer, sheet_name='Lockout Analysis', index=False)
+        df[pcols].to_excel(writer, sheet_name='Loan Panel', index=False)
+        df.to_excel(writer, sheet_name='Full Detail', index=False)
 
-    ws = wb.create_sheet('Instructions', 0)
-    for r in [
-        ['GNMA MF Prepayment S-Curve Dataset'],
-        [''],
-        ['Generated:', datetime.now().strftime('%Y-%m-%d %H:%M')],
-        ['Periods:', ', '.join(sorted(monthly_data.keys()))],
-        ['Observations:', len(df)],
-        ['Unique Loans:', df['loan_id'].nunique()],
-        ['Vol Prepays:', int(df['prepaid_voluntary'].sum())],
-        [''],
-        ['TO COMPLETE THE S-CURVE:'],
-        ['1. Fill benchmark_rate column with prevailing GNMA MF coupon for each period'],
-        ['2. Compute: refi_incentive_bps = (loan_rate - benchmark_rate) * 10000'],
-        ['3. Re-bucket by incentive for the final S-curve shape'],
-        ['4. Fit: P(prepay) = f(incentive, age, lockout, penalty, loan_size, ...)'],
-        [''],
-        ['PREPAYMENT FLAGS:'],
-        ['prepaid_voluntary=1: Mortgagor payoff or loan disappears while current'],
-        ['prepaid_involuntary=1: Repurchase/foreclosure or disappears while delinquent'],
-        ['Construction loans (CL/CS) excluded from panel'],
-    ]:
-        ws.append(r)
-    ws['A1'].font = Font(name='Arial', bold=True, size=14, color='1E3A5F')
-    ws.column_dimensions['A'].width = 25
-    ws.column_dimensions['B'].width = 70
-    wb.save(OUTPUT_FILE)
-
-    print(f"\n{'=' * 60}")
+    print(f"\n{'='*60}")
     print(f"  ok {OUTPUT_FILE}")
     print(f"     {len(df)} obs, {df['loan_id'].nunique()} loans, "
           f"{int(df['prepaid_voluntary'].sum())} vol prepays")
     print(f"     Tabs: Instructions | Summary | S-Curve Buckets | "
           f"Lockout | Loan Panel | Full Detail")
-    print(f"{'=' * 60}")
+    print(f"{'='*60}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -710,41 +583,27 @@ def main():
 +==============================================================+
 """)
 
-    # ─── DOWNLOAD ──────────────────────────────────
     if not args.skip_download:
         email = args.email or input("GNMA Disclosure email: ").strip()
         answer = args.answer or input("Security question answer: ").strip()
-
         if not ensure_playwright():
-            print("Playwright installation failed. Install manually:")
-            print("  pip install playwright && python3 -m playwright install firefox")
+            print("Playwright installation failed.")
             return
-
         session = authenticate_gnma(email, answer)
         if session:
             download_files(session, args.months)
         else:
-            print(f"""
-+==============================================================+
-|  Authentication failed.                                      |
-|                                                              |
-|  Manual fallback:                                            |
-|  1. Open ginniemae.gov disclosure data download page         |
-|  2. Log in, download mfplmon3_YYYYMM.zip files              |
-|  3. Place in: {DATA_DIR:<44} |
-|  4. Re-run with: python3 main.py --skip-download             |
-+==============================================================+
-""")
+            print(f"\n  Manual fallback: download mfplmon3 files to {DATA_DIR}")
+            print(f"  Then: python3 main.py --skip-download")
 
-    # ─── PARSE ─────────────────────────────────────
+    # Clear LD_LIBRARY_PATH to avoid expat/XML conflicts during Excel write
+    os.environ.pop('LD_LIBRARY_PATH', None)
+
     os.makedirs(DATA_DIR, exist_ok=True)
-    allf = sorted(
-        glob.glob(os.path.join(DATA_DIR, "*.zip")) +
-        glob.glob(os.path.join(DATA_DIR, "*.txt")))
-
+    allf = sorted(glob.glob(os.path.join(DATA_DIR,"*.zip")) +
+                  glob.glob(os.path.join(DATA_DIR,"*.txt")))
     if not allf:
-        print(f"No files in {DATA_DIR}")
-        return
+        print(f"No files in {DATA_DIR}"); return
 
     print(f"\n[parse] Parsing {len(allf)} files...")
     md = {}
@@ -756,15 +615,12 @@ def main():
         if recs:
             md[per] = recs
             pt = defaultdict(int)
-            for r in recs:
-                pt[r['pool_type']] += 1
+            for r in recs: pt[r['pool_type']] += 1
             print(f"  {os.path.basename(fp)} -> {per}: {len(recs)} records {dict(pt)}")
 
     if len(md) < 2:
-        print("\nNeed at least 2 months to identify prepayments. Download more files.")
-        return
+        print("\nNeed 2+ months for prepay identification."); return
 
-    # ─── BUILD ─────────────────────────────────────
     df = build_panel(md)
     print(f"\n[panel] {len(df)} loan-month obs, {df['loan_id'].nunique()} unique loans")
     print(f"  Vol prepays: {df['prepaid_voluntary'].sum():.0f}")
