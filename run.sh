@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+# Install Python dependencies
+pip install -q -r requirements.txt
+
 # Install Firefox for Playwright if not already present
 if ! ls "$HOME/workspace/.cache/ms-playwright/firefox-"*/firefox/firefox &>/dev/null; then
     echo "[setup] Installing Firefox for Playwright..."
@@ -16,3 +19,13 @@ if ! ls "$HOME/workspace/.cache/ms-playwright/firefox-"*/firefox/firefox &>/dev/
 fi
 
 python3 main.py "$@"
+
+# Show output summary if CSV was created
+if [ -f gnma_mf_raw_data.csv ]; then
+    echo ""
+    echo "[verify] Column headers:"
+    head -1 gnma_mf_raw_data.csv
+    echo ""
+    echo "[verify] Total lines: $(wc -l < gnma_mf_raw_data.csv)"
+    echo "[verify] File size: $(ls -lh gnma_mf_raw_data.csv | awk '{print $5}')"
+fi
