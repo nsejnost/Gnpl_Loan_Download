@@ -421,22 +421,19 @@ def read_mfplmon3(filepath):
 #  ANALYTICS: PREPAYMENT FLAGS, LOCKOUT, REFI INCENTIVE
 # ═══════════════════════════════════════════════════════════
 
-PLC_SPREAD_BPS = 70  # Assumed spread over 10yr Treasury for PLC rate
-
-def load_treasury_rates():
-    """Load 10yrTsyRates.csv, return monthly average rates keyed by YYYYMM."""
-    tsy_path = os.path.join(SCRIPT_DIR, '10yrTsyRates.csv')
-    if not os.path.exists(tsy_path):
-        print("[analytics] WARNING: 10yrTsyRates.csv not found, skipping refi incentive")
+def load_plc_rates():
+    """Load GnmaPlcRatesHistorical.csv, return PLC rates in bps keyed by YYYYMM."""
+    plc_path = os.path.join(SCRIPT_DIR, 'GnmaPlcRatesHistorical.csv')
+    if not os.path.exists(plc_path):
+        print("[analytics] WARNING: GnmaPlcRatesHistorical.csv not found, skipping refi incentive")
         return {}
-    tsy = pd.read_csv(tsy_path)
-    tsy.columns = [c.strip() for c in tsy.columns]
-    tsy['DGS10'] = pd.to_numeric(tsy['DGS10'], errors='coerce')
-    tsy = tsy.dropna(subset=['DGS10'])
-    tsy['observation_date'] = pd.to_datetime(tsy['observation_date'])
-    tsy['yyyymm'] = tsy['observation_date'].dt.strftime('%Y%m')
-    monthly = tsy.groupby('yyyymm')['DGS10'].mean()
-    return monthly.to_dict()
+    plc = pd.read_csv(plc_path)
+    plc.columns = [c.strip() for c in plc.columns]
+    plc['PLC_Rate_BPS'] = pd.to_numeric(plc['PLC_Rate_BPS'], errors='coerce')
+    plc = plc.dropna(subset=['PLC_Rate_BPS'])
+    plc['Date'] = pd.to_datetime(plc['Date'])
+    plc['yyyymm'] = plc['Date'].dt.strftime('%Y%m')
+    return dict(zip(plc['yyyymm'], plc['PLC_Rate_BPS']))
 
 
 def parse_date_yyyymmdd(s):
@@ -453,13 +450,13 @@ def build_analytics(monthly_data):
     - Excludes lockout-period loans from prepayment calculations
     - Computes refi incentive per the formula:
       Refi Incentive (bps) = Net Coupon (bps) - (PLC_bps + (1 + prepay_penalty_points) * 12.5)
-      where PLC = 10yr Treasury + 70bps spread
+      where PLC is from GnmaPlcRatesHistorical.csv (actual GNMA published rates)
     """
     periods = sorted(monthly_data.keys())
     print(f"\n[analytics] Enriching {len(periods)} periods with prepayment & refi incentive data...")
 
-    # Load treasury rates for PLC calculation
-    tsy_rates = load_treasury_rates()
+    # Load PLC rates (already in bps)
+    plc_rates = load_plc_rates()
 
     # Build lookup: period -> {loan_id -> record}
     pmap = {p: {r['loan_id']: r for r in recs} for p, recs in monthly_data.items()}
@@ -469,9 +466,8 @@ def build_analytics(monthly_data):
         nxt = periods[i + 1] if i + 1 < len(periods) else None
         nl = pmap.get(nxt, {}) if nxt else {}
 
-        # PLC rate for this period: 10yr Treasury + spread
-        tsy_rate = tsy_rates.get(period, np.nan)
-        plc_rate = tsy_rate + PLC_SPREAD_BPS / 100.0 if pd.notna(tsy_rate) else np.nan
+        # PLC rate for this period (already in bps from CSV)
+        plc_bps = plc_rates.get(period, np.nan)
 
         for r in monthly_data[period]:
             r['period'] = period
@@ -505,14 +501,13 @@ def build_analytics(monthly_data):
             # Refi incentive calculation
             # Refi Incentive (bps) = Net Coupon (bps) - (PLC_bps + (1 + penalty_points) * 12.5)
             loan_rate = r.get('loan_rate', np.nan)
-            if pd.notna(loan_rate) and pd.notna(plc_rate):
+            if pd.notna(loan_rate) and pd.notna(plc_bps):
                 net_coupon_bps = loan_rate * 100  # e.g., 5.0 -> 500 bps
-                plc_bps = plc_rate * 100  # e.g., 4.7 -> 470 bps
                 refi_incentive = net_coupon_bps - (plc_bps + (1 + prepay_penalty_points) * 12.5)
-                r['plc_rate'] = round(plc_rate, 4)
+                r['plc_rate_bps'] = plc_bps
                 r['refi_incentive_bps'] = round(refi_incentive, 2)
             else:
-                r['plc_rate'] = np.nan
+                r['plc_rate_bps'] = np.nan
                 r['refi_incentive_bps'] = np.nan
 
             # Prepayment flags (only for loans NOT in lockout)
