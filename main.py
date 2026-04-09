@@ -418,18 +418,151 @@ def read_mfplmon3(filepath):
 
 
 # ═══════════════════════════════════════════════════════════
-#  RAW DATA OUTPUT
+#  ANALYTICS: PREPAYMENT FLAGS, LOCKOUT, REFI INCENTIVE
 # ═══════════════════════════════════════════════════════════
 
-def write_raw_csv(monthly_data):
-    """Combine all parsed records across periods into a single CSV."""
+PLC_SPREAD_BPS = 70  # Assumed spread over 10yr Treasury for PLC rate
+
+def load_treasury_rates():
+    """Load 10yrTsyRates.csv, return monthly average rates keyed by YYYYMM."""
+    tsy_path = os.path.join(SCRIPT_DIR, '10yrTsyRates.csv')
+    if not os.path.exists(tsy_path):
+        print("[analytics] WARNING: 10yrTsyRates.csv not found, skipping refi incentive")
+        return {}
+    tsy = pd.read_csv(tsy_path)
+    tsy.columns = [c.strip() for c in tsy.columns]
+    tsy['DGS10'] = pd.to_numeric(tsy['DGS10'], errors='coerce')
+    tsy = tsy.dropna(subset=['DGS10'])
+    tsy['observation_date'] = pd.to_datetime(tsy['observation_date'])
+    tsy['yyyymm'] = tsy['observation_date'].dt.strftime('%Y%m')
+    monthly = tsy.groupby('yyyymm')['DGS10'].mean()
+    return monthly.to_dict()
+
+
+def parse_date_yyyymmdd(s):
+    """Parse YYYYMMDD or YYYYMM string to a comparable YYYYMM string."""
+    s = (s or '').strip()
+    if len(s) >= 6:
+        return s[:6]
+    return ''
+
+
+def build_analytics(monthly_data):
+    """Enrich raw records with prepayment flags, lockout status, and refi incentive.
+
+    - Excludes lockout-period loans from prepayment calculations
+    - Computes refi incentive per the formula:
+      Refi Incentive (bps) = Net Coupon (bps) - (PLC_bps + (1 + prepay_penalty_points) * 12.5)
+      where PLC = 10yr Treasury + 70bps spread
+    """
+    periods = sorted(monthly_data.keys())
+    print(f"\n[analytics] Enriching {len(periods)} periods with prepayment & refi incentive data...")
+
+    # Load treasury rates for PLC calculation
+    tsy_rates = load_treasury_rates()
+
+    # Build lookup: period -> {loan_id -> record}
+    pmap = {p: {r['loan_id']: r for r in recs} for p, recs in monthly_data.items()}
+
     all_records = []
-    for period in sorted(monthly_data.keys()):
-        for rec in monthly_data[period]:
-            rec['period'] = period
-            all_records.append(rec)
+    for i, period in enumerate(periods):
+        nxt = periods[i + 1] if i + 1 < len(periods) else None
+        nl = pmap.get(nxt, {}) if nxt else {}
+
+        # PLC rate for this period: 10yr Treasury + spread
+        tsy_rate = tsy_rates.get(period, np.nan)
+        plc_rate = tsy_rate + PLC_SPREAD_BPS / 100.0 if pd.notna(tsy_rate) else np.nan
+
+        for r in monthly_data[period]:
+            r['period'] = period
+
+            # Lockout status: compare period to lockout_end_date
+            lockout_end_yyyymm = parse_date_yyyymmdd(r.get('lockout_end_date', ''))
+            in_lockout = 1 if lockout_end_yyyymm and period < lockout_end_yyyymm else 0
+            r['in_lockout'] = in_lockout
+
+            # Prepay penalty status
+            prepay_end_yyyymm = parse_date_yyyymmdd(r.get('prepay_end_date', ''))
+            in_penalty = 1 if prepay_end_yyyymm and period < prepay_end_yyyymm else 0
+            r['in_prepay_penalty'] = in_penalty
+            r['past_all_restrictions'] = 1 if not in_lockout and not in_penalty else 0
+
+            # Current prepay penalty points (years remaining * 1 point/year, floored at 0)
+            if prepay_end_yyyymm and period < prepay_end_yyyymm:
+                try:
+                    pe_yr = int(prepay_end_yyyymm[:4])
+                    pe_mo = int(prepay_end_yyyymm[4:6])
+                    p_yr = int(period[:4])
+                    p_mo = int(period[4:6])
+                    months_remaining = (pe_yr - p_yr) * 12 + (pe_mo - p_mo)
+                    prepay_penalty_points = max(months_remaining / 12.0, 0)
+                except (ValueError, IndexError):
+                    prepay_penalty_points = 0.0
+            else:
+                prepay_penalty_points = 0.0
+            r['prepay_penalty_points'] = round(prepay_penalty_points, 2)
+
+            # Refi incentive calculation
+            # Refi Incentive (bps) = Net Coupon (bps) - (PLC_bps + (1 + penalty_points) * 12.5)
+            loan_rate = r.get('loan_rate', np.nan)
+            if pd.notna(loan_rate) and pd.notna(plc_rate):
+                net_coupon_bps = loan_rate * 100  # e.g., 5.0 -> 500 bps
+                plc_bps = plc_rate * 100  # e.g., 4.7 -> 470 bps
+                refi_incentive = net_coupon_bps - (plc_bps + (1 + prepay_penalty_points) * 12.5)
+                r['plc_rate'] = round(plc_rate, 4)
+                r['refi_incentive_bps'] = round(refi_incentive, 2)
+            else:
+                r['plc_rate'] = np.nan
+                r['refi_incentive_bps'] = np.nan
+
+            # Prepayment flags (only for loans NOT in lockout)
+            lid = r.get('loan_id', '')
+            rm = r.get('removal_reason', '').strip()
+            mdq = r.get('months_dq', 0) or 0
+
+            if in_lockout:
+                # Loans in lockout are excluded from prepayment calculations
+                r['prepaid_voluntary'] = 0
+                r['prepaid_involuntary'] = 0
+                r['prepay_eligible'] = 0
+            else:
+                r['prepay_eligible'] = 1
+                vol = rm == '1'
+                invol = rm in ('2', '3', '4', '6')
+                # Disappearance tracking (loan in T but not in T+1)
+                disappeared = nxt is not None and lid not in nl
+                if disappeared and not vol and not invol:
+                    vol = mdq == 0
+                    invol = mdq > 0
+                r['prepaid_voluntary'] = 1 if vol else 0
+                r['prepaid_involuntary'] = 1 if invol else 0
+
+            all_records.append(r)
 
     df = pd.DataFrame(all_records)
+
+    # Summary stats
+    eligible = df[df['prepay_eligible'] == 1]
+    vol = eligible['prepaid_voluntary'].sum()
+    invol = eligible['prepaid_involuntary'].sum()
+    locked = (df['in_lockout'] == 1).sum()
+    print(f"  Total records: {len(df)}")
+    print(f"  Prepay-eligible (not in lockout): {len(eligible)}")
+    print(f"  In lockout (excluded): {locked}")
+    print(f"  Voluntary prepays: {vol:.0f}")
+    print(f"  Involuntary removals: {invol:.0f}")
+    if df['refi_incentive_bps'].notna().any():
+        print(f"  Refi incentive range: {df['refi_incentive_bps'].min():.0f} to {df['refi_incentive_bps'].max():.0f} bps")
+
+    return df
+
+
+# ═══════════════════════════════════════════════════════════
+#  OUTPUT
+# ═══════════════════════════════════════════════════════════
+
+def write_csv(df, monthly_data):
+    """Write enriched DataFrame to CSV."""
     df.to_csv(OUTPUT_CSV, index=False)
 
     print(f"\n{'='*60}")
@@ -449,7 +582,7 @@ def main():
     ap = argparse.ArgumentParser(description="GNMA MF Downloader & Raw Data Exporter")
     ap.add_argument("--email", help="GNMA Disclosure email")
     ap.add_argument("--answer", help="Security question answer")
-    ap.add_argument("--months", type=int, default=6, help="Months to download (default: 6)")
+    ap.add_argument("--months", type=int, default=12, help="Months to download (default: 12)")
     ap.add_argument("--skip-download", action="store_true", help="Skip download, parse existing files")
     ap.add_argument("--data-dir", help="Override data directory")
     args = ap.parse_args()
@@ -505,7 +638,8 @@ def main():
     if not md:
         print("\nNo valid records parsed."); return
 
-    write_raw_csv(md)
+    df = build_analytics(md)
+    write_csv(df, md)
 
 
 if __name__ == "__main__":
