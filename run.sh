@@ -20,7 +20,7 @@ fi
 
 python3 main.py "$@"
 
-# Show output summary and push CSV to GitHub if created
+# Show output summary if CSV was created
 if [ -f gnma_mf_raw_data.csv ]; then
     echo ""
     echo "[verify] Column headers:"
@@ -28,6 +28,7 @@ if [ -f gnma_mf_raw_data.csv ]; then
     echo ""
     echo "[verify] Total lines: $(wc -l < gnma_mf_raw_data.csv)"
     echo "[verify] File size: $(ls -lh gnma_mf_raw_data.csv | awk '{print $5}')"
+
 
     echo ""
     echo "[git] Pushing CSV to GitHub..."
