@@ -20,21 +20,9 @@ fi
 
 python3 main.py "$@"
 
-# Show output summary if CSV was created
-if [ -f gnma_mf_raw_data.csv ]; then
+# Show output summary if gzipped CSV was created
+if [ -f gnma_mf_raw_data.csv.gz ]; then
     echo ""
-    echo "[verify] Column headers:"
-    head -1 gnma_mf_raw_data.csv
-    echo ""
-    echo "[verify] Total lines: $(wc -l < gnma_mf_raw_data.csv)"
-    echo "[verify] File size: $(ls -lh gnma_mf_raw_data.csv | awk '{print $5}')"
-
-
-    echo ""
-    echo "[git] Pushing CSV to GitHub..."
-    git config user.email "nsejnost@gmail.com"
-    git config user.name "nsejnost"
-    git add gnma_mf_raw_data.csv
-    git commit -m "Update raw data $(date +%Y-%m-%d)" || true
-    git push || echo "[git] Push failed — check git credentials"
+    echo "[verify] File size: $(ls -lh gnma_mf_raw_data.csv.gz | awk '{print $5}')"
+    echo "[verify] To open in pandas: pd.read_csv('gnma_mf_raw_data.csv.gz')"
 fi
