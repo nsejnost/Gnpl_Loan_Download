@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GNMA Multifamily Prepayment Analysis</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root { --blue: #2563eb; --red: #dc2626; --green: #16a34a; --amber: #f59e0b;
+           --gray: #6b7280; --bg: #f8fafc; --card: #ffffff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background: var(--bg); color: #1e293b; line-height: 1.6; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; color: #0f172a; }
+  h2 { font-size: 1.5rem; font-weight: 600; margin: 2.5rem 0 1rem; color: #0f172a;
+        border-bottom: 2px solid var(--blue); padding-bottom: 0.5rem; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.75rem; color: #334155; }
+  .subtitle { color: var(--gray); font-size: 1rem; margin-bottom: 2rem; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 1rem; margin: 1.5rem 0; }
+  .stat-card { background: var(--card); border-radius: 8px; padding: 1.25rem;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+  .stat-value { font-size: 1.8rem; font-weight: 700; color: var(--blue); }
+  .stat-label { font-size: 0.85rem; color: var(--gray); margin-top: 0.25rem; }
+  .chart-container { background: var(--card); border-radius: 8px; padding: 1.5rem;
+                      box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin: 1.5rem 0; }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  @media (max-width: 768px) { .chart-row { grid-template-columns: 1fr; } }
+  canvas { max-height: 400px; }
+  .insight { background: #eff6ff; border-left: 4px solid var(--blue); padding: 1rem 1.25rem;
+              border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.95rem; }
+  .insight strong { color: var(--blue); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th { background: #f1f5f9; padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e2e8f0; }
+  .loan-card { background: var(--card); border-radius: 8px; padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin: 1.25rem 0;
+                border-left: 4px solid var(--gray); }
+  .loan-card.prepaid { border-left-color: var(--red); }
+  .loan-card.high-risk { border-left-color: var(--amber); }
+  .loan-card.low-risk { border-left-color: var(--green); }
+  .loan-header { display: flex; justify-content: space-between; align-items: center;
+                   margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem; }
+  .loan-label { font-weight: 700; font-size: 1.1rem; }
+  .loan-pred { font-family: monospace; color: var(--gray); font-size: 0.9rem; }
+  .loan-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                    gap: 0.5rem; margin-bottom: 1rem; font-size: 0.9rem; }
+  .loan-subtitle { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem; color: #334155; }
+  .factor-table { font-size: 0.85rem; }
+  .factor-table th { font-size: 0.8rem; }
+  .factor-name { font-weight: 500; white-space: nowrap; }
+  .factor-value { font-family: monospace; text-align: right; white-space: nowrap; }
+  .factor-shap { font-family: monospace; font-weight: 600; text-align: right; white-space: nowrap; }
+  .bar-container { width: 120px; height: 14px; background: #f1f5f9; border-radius: 3px;
+                     display: flex; }
+  .bar { height: 100%; border-radius: 3px; min-width: 2px; }
+  .methodology { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+                   padding: 1.5rem; margin: 1.5rem 0; font-size: 0.9rem; }
+  .methodology ul { margin-left: 1.25rem; }
+  .methodology li { margin: 0.3rem 0; }
+  .footer { text-align: center; color: var(--gray); font-size: 0.8rem; margin-top: 3rem;
+              padding-top: 1.5rem; border-top: 1px solid #e2e8f0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>GNMA Multifamily Prepayment Analysis</h1>
+<p class="subtitle">Machine learning analysis of prepayment patterns in GNMA multifamily mortgage-backed securities.<br>
+Data: 24 monthly periods &middot; 16,751 unique loans &middot; 363,933 loan-month observations</p>
+
+<!-- ── Summary Stats ──────────────────────────────────────── -->
+<h2>1. Dataset Overview</h2>
+<div class="stat-grid">
+  <div class="stat-card"><div class="stat-value">16,751</div><div class="stat-label">Unique Loans</div></div>
+  <div class="stat-card"><div class="stat-value">352,007</div><div class="stat-label">Eligible Loan-Months</div></div>
+  <div class="stat-card"><div class="stat-value">902</div><div class="stat-label">Voluntary Prepayments</div></div>
+  <div class="stat-card"><div class="stat-value">0.26%</div><div class="stat-label">Avg Monthly Prepay (SMM)</div></div>
+  <div class="stat-card"><div class="stat-value">3.0%</div><div class="stat-label">Annualized CPR</div></div>
+  <div class="stat-card"><div class="stat-value">0.722</div><div class="stat-label">Model AUC (Test)</div></div>
+</div>
+
+<div class="insight">
+  <strong>Key finding:</strong> The unconditional monthly prepayment rate (SMM) is 0.26%,
+  corresponding to an annualized CPR of 3.0%. This serves as the baseline against
+  which individual loan characteristics shift prepayment probability.
+</div>
+
+<!-- ── Empirical S-Curves ─────────────────────────────────── -->
+<h2>2. Prepayment S-Curves</h2>
+
+<h3>2a. Refi Incentive S-Curve (Empirical)</h3>
+<p>CPR by refinance incentive bucket (net coupon minus PLC rate, in basis points). The classic S-curve shape
+emerges: prepayment accelerates sharply when the refi incentive exceeds ~75-100 bps.</p>
+
+<div class="chart-container">
+  <canvas id="chart_scurve_refi"></canvas>
+</div>
+
+<h3>2b. S-Curve by Penalty Status</h3>
+<p>Loans past all prepayment restrictions show materially higher CPRs than those still in penalty periods,
+especially in the money.</p>
+
+<div class="chart-container">
+  <canvas id="chart_scurve_penalty"></canvas>
+</div>
+
+<h3>2c. Model-Implied S-Curves</h3>
+<p>XGBoost model predictions across the full refi incentive spectrum, holding other features at median.
+Shows the model's learned relationship between refi incentive and prepayment, with and without penalty protection.</p>
+
+<div class="chart-container">
+  <canvas id="chart_model_scurve"></canvas>
+</div>
+
+<h3>2d. CPR by Other Dimensions</h3>
+<div class="chart-row">
+  <div class="chart-container"><canvas id="chart_age"></canvas></div>
+  <div class="chart-container"><canvas id="chart_upb"></canvas></div>
+</div>
+<div class="chart-row">
+  <div class="chart-container"><canvas id="chart_penpts"></canvas></div>
+  <div class="chart-container"><canvas id="chart_state"></canvas></div>
+</div>
+
+<div class="insight">
+  <strong>Patterns observed:</strong> Older loans (10yr+) prepay significantly faster.
+  Larger loans show higher CPRs, suggesting more sophisticated borrowers with better refinance access.
+  Higher penalty points dramatically suppress prepayment.
+</div>
+
+<!-- ── Model Performance ──────────────────────────────────── -->
+<h2>3. Model Performance &amp; Feature Importance</h2>
+
+<div class="methodology">
+  <strong>Methodology:</strong>
+  <ul>
+    <li><strong>Model:</strong> XGBoost gradient-boosted classifier with moderate class weighting (3x)</li>
+    <li><strong>Train/Test Split:</strong> Time-based &mdash; trained on periods 202404&ndash;202509
+        (262,302 obs, 584 prepays); tested on 202510, 202511, 202512, 202601, 202602, 202603
+        (89,705 obs, 318 prepays)</li>
+    <li><strong>Features:</strong> Refi incentive, penalty points, loan age, remaining term, coupon rate,
+        loan size (log UPB), unit count, penalty status, state, pool type, green/affordable flags</li>
+    <li><strong>Test AUC:</strong> 0.722 &middot; <strong>Test Brier Score:</strong> 0.0036</li>
+  </ul>
+</div>
+
+<div class="chart-row">
+  <div class="chart-container"><canvas id="chart_feat_imp"></canvas></div>
+  <div class="chart-container"><canvas id="chart_shap_imp"></canvas></div>
+</div>
+
+<div class="insight">
+  <strong>Top predictors (SHAP):</strong> Remaining term and loan age are the strongest predictors &mdash; loans
+  nearing maturity or with long seasoning prepay much more often. Loan size (log UPB) and unit count
+  capture borrower sophistication. Refi incentive and penalty points drive the economic motivation layer.
+</div>
+
+<!-- ── Sample Loan Attribution ────────────────────────────── -->
+<h2>4. Sample Loan Attribution</h2>
+
+<p>For each sample loan below, SHAP values decompose the model's predicted prepayment probability
+relative to the population baseline (SMM = 0.26%, CPR = 3.0%).
+Red bars indicate factors that <em>increase</em> prepayment risk; green bars indicate factors that <em>decrease</em> it.</p>
+
+
+    <div class="loan-card prepaid">
+        <div class="loan-header">
+            <span class="loan-label">Prepaid</span>
+            <span class="loan-pred">Predicted SMM: 0.0084 | CPR: 9.65%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> CA</div>
+            <div><strong>Rate:</strong> 2.99%</div>
+            <div><strong>Refi Incentive:</strong> -191 bps</div>
+            <div><strong>Penalty Status:</strong> past_all</div>
+            <div><strong>Penalty Points:</strong> 0.0%</div>
+            <div><strong>Loan Age:</strong> 158 months</div>
+            <div><strong>UPB:</strong> $9,430,579</div>
+            <div><strong>Units:</strong> 104</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">262.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:59%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.297</td>
+        </tr>
+        <tr>
+            <td class="factor-name">security rate</td>
+            <td class="factor-value">2.5</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:39%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.195</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:20%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.102</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">158.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:16%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.080</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan rate</td>
+            <td class="factor-value">3.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:13%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.064</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: IN</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:12%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.059</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:10%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.052</td>
+        </tr>
+        <tr>
+            <td class="factor-name">in prepay penalty</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:7%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.037</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card prepaid">
+        <div class="loan-header">
+            <span class="loan-label">Prepaid</span>
+            <span class="loan-pred">Predicted SMM: 0.0134 | CPR: 14.92%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> LA</div>
+            <div><strong>Rate:</strong> 3.80%</div>
+            <div><strong>Refi Incentive:</strong> -123 bps</div>
+            <div><strong>Penalty Status:</strong> past_all</div>
+            <div><strong>Penalty Points:</strong> 0.0%</div>
+            <div><strong>Loan Age:</strong> 133 months</div>
+            <div><strong>UPB:</strong> $2,244,340</div>
+            <div><strong>Units:</strong> 146</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">288.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:48%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.238</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:20%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.102</td>
+        </tr>
+        <tr>
+            <td class="factor-name">refi incentive bps</td>
+            <td class="factor-value">-123.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:19%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.096</td>
+        </tr>
+        <tr>
+            <td class="factor-name">num units</td>
+            <td class="factor-value">146.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:17%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.084</td>
+        </tr>
+        <tr>
+            <td class="factor-name">security rate</td>
+            <td class="factor-value">3.5</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:14%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.068</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">1.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:12%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.060</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan rate</td>
+            <td class="factor-value">3.8</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:11%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.054</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">133.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:10%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.051</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card prepaid">
+        <div class="loan-header">
+            <span class="loan-label">Prepaid</span>
+            <span class="loan-pred">Predicted SMM: 0.0126 | CPR: 14.13%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> NY</div>
+            <div><strong>Rate:</strong> 3.08%</div>
+            <div><strong>Refi Incentive:</strong> -192 bps</div>
+            <div><strong>Penalty Status:</strong> past_all</div>
+            <div><strong>Penalty Points:</strong> 0.0%</div>
+            <div><strong>Loan Age:</strong> 146 months</div>
+            <div><strong>UPB:</strong> $2,213,285</div>
+            <div><strong>Units:</strong> 50</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">274.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:79%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.397</td>
+        </tr>
+        <tr>
+            <td class="factor-name">num units</td>
+            <td class="factor-value">50.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:29%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.145</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan rate</td>
+            <td class="factor-value">3.1</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:29%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.145</td>
+        </tr>
+        <tr>
+            <td class="factor-name">log upb</td>
+            <td class="factor-value">14.6</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:19%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.096</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">146.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:19%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.093</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:18%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.090</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: IN</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:15%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.073</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:9%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.047</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card high-risk">
+        <div class="loan-header">
+            <span class="loan-label">High-Risk (survived)</span>
+            <span class="loan-pred">Predicted SMM: 0.1476 | CPR: 85.29%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> NH</div>
+            <div><strong>Rate:</strong> 2.49%</div>
+            <div><strong>Refi Incentive:</strong> -254 bps</div>
+            <div><strong>Penalty Status:</strong> past_all</div>
+            <div><strong>Penalty Points:</strong> 0.0%</div>
+            <div><strong>Loan Age:</strong> 163 months</div>
+            <div><strong>UPB:</strong> $2,697,230</div>
+            <div><strong>Units:</strong> 181</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">-2.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+2.969</td>
+        </tr>
+        <tr>
+            <td class="factor-name">log upb</td>
+            <td class="factor-value">14.8</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:62%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.309</td>
+        </tr>
+        <tr>
+            <td class="factor-name">security rate</td>
+            <td class="factor-value">2.2</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:51%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.257</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">1.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:38%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.190</td>
+        </tr>
+        <tr>
+            <td class="factor-name">num units</td>
+            <td class="factor-value">181.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:37%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.184</td>
+        </tr>
+        <tr>
+            <td class="factor-name">refi incentive bps</td>
+            <td class="factor-value">-254.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:20%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.102</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:15%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.076</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">163.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:10%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.051</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card high-risk">
+        <div class="loan-header">
+            <span class="loan-label">High-Risk (survived)</span>
+            <span class="loan-pred">Predicted SMM: 0.1935 | CPR: 92.43%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> NY</div>
+            <div><strong>Rate:</strong> 3.23%</div>
+            <div><strong>Refi Incentive:</strong> -177 bps</div>
+            <div><strong>Penalty Status:</strong> past_all</div>
+            <div><strong>Penalty Points:</strong> 0.0%</div>
+            <div><strong>Loan Age:</strong> 124 months</div>
+            <div><strong>UPB:</strong> $3,989,572</div>
+            <div><strong>Units:</strong> 200</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">31.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+2.784</td>
+        </tr>
+        <tr>
+            <td class="factor-name">log upb</td>
+            <td class="factor-value">15.2</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:83%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.416</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">124.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:55%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.277</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:39%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.196</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:23%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.114</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan rate</td>
+            <td class="factor-value">3.2</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:22%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.111</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: IN</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:7%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.034</td>
+        </tr>
+        <tr>
+            <td class="factor-name">in prepay penalty</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:6%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.031</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card low-risk">
+        <div class="loan-header">
+            <span class="loan-label">Low-Risk</span>
+            <span class="loan-pred">Predicted SMM: 0.0002 | CPR: 0.19%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> NC</div>
+            <div><strong>Rate:</strong> 2.25%</div>
+            <div><strong>Refi Incentive:</strong> -347 bps</div>
+            <div><strong>Penalty Status:</strong> in_penalty</div>
+            <div><strong>Penalty Points:</strong> 9.0%</div>
+            <div><strong>Loan Age:</strong> 23 months</div>
+            <div><strong>UPB:</strong> $30,990,429</div>
+            <div><strong>Units:</strong> 216</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">487.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-1.221</td>
+        </tr>
+        <tr>
+            <td class="factor-name">log upb</td>
+            <td class="factor-value">17.2</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.944</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">23.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.622</td>
+        </tr>
+        <tr>
+            <td class="factor-name">security rate</td>
+            <td class="factor-value">2.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:76%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.378</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">9.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:71%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.353</td>
+        </tr>
+        <tr>
+            <td class="factor-name">refi incentive bps</td>
+            <td class="factor-value">-347.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:52%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.261</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: NC</td>
+            <td class="factor-value">1.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:34%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.168</td>
+        </tr>
+        <tr>
+            <td class="factor-name">num units</td>
+            <td class="factor-value">216.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:16%; background:#dc2626;
+                         "></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#dc2626">+0.080</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+    <div class="loan-card low-risk">
+        <div class="loan-header">
+            <span class="loan-label">Low-Risk</span>
+            <span class="loan-pred">Predicted SMM: 0.0001 | CPR: 0.16%</span>
+        </div>
+        <div class="loan-details">
+            <div><strong>State:</strong> TN</div>
+            <div><strong>Rate:</strong> 2.50%</div>
+            <div><strong>Refi Incentive:</strong> -353 bps</div>
+            <div><strong>Penalty Status:</strong> in_penalty</div>
+            <div><strong>Penalty Points:</strong> 8.0%</div>
+            <div><strong>Loan Age:</strong> 35 months</div>
+            <div><strong>UPB:</strong> $34,449,126</div>
+            <div><strong>Units:</strong> 201</div>
+        </div>
+        <div class="loan-subtitle">Top Factors Driving Prediction vs. Baseline</div>
+        <table class="factor-table">
+            <thead><tr><th>Factor</th><th>Value</th><th>Impact</th><th>SHAP</th></tr></thead>
+            <tbody>
+        <tr>
+            <td class="factor-name">remaining term</td>
+            <td class="factor-value">459.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-1.234</td>
+        </tr>
+        <tr>
+            <td class="factor-name">log upb</td>
+            <td class="factor-value">17.4</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.944</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan age months</td>
+            <td class="factor-value">35.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:100%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.579</td>
+        </tr>
+        <tr>
+            <td class="factor-name">prepay penalty points</td>
+            <td class="factor-value">8.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:67%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.334</td>
+        </tr>
+        <tr>
+            <td class="factor-name">security rate</td>
+            <td class="factor-value">2.2</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:60%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.298</td>
+        </tr>
+        <tr>
+            <td class="factor-name">refi incentive bps</td>
+            <td class="factor-value">-353.0</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:44%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.222</td>
+        </tr>
+        <tr>
+            <td class="factor-name">loan rate</td>
+            <td class="factor-value">2.5</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:29%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.147</td>
+        </tr>
+        <tr>
+            <td class="factor-name">State: Other</td>
+            <td class="factor-value">0.000</td>
+            <td class="factor-bar">
+                <div class="bar-container">
+                    <div class="bar" style="width:14%; background:#16a34a;
+                         margin-left:auto"></div>
+                </div>
+            </td>
+            <td class="factor-shap" style="color:#16a34a">-0.068</td>
+        </tr></tbody>
+        </table>
+    </div>
+
+<div class="insight">
+  <strong>Attribution interpretation:</strong> The SHAP waterfall starts from the model's base prediction
+  (log-odds = -5.023). Each factor's SHAP value shifts the prediction
+  up or down. The sum of all SHAP values plus the base equals the final log-odds prediction, which is
+  then converted to probability via the logistic function.
+</div>
+
+<!-- ── Conclusions ─────────────────────────────────────────── -->
+<h2>5. Key Findings &amp; Conclusions</h2>
+
+<div class="methodology">
+<ol style="margin-left:1.25rem">
+  <li><strong>Refi incentive is a key economic driver</strong> but the S-curve is flatter than in single-family
+      MBS due to commercial borrower heterogeneity, prepayment penalties, and defeasance costs.</li>
+  <li><strong>Penalty protection is highly effective:</strong> Loans with active prepayment penalties show
+      near-zero CPRs regardless of refi incentive. Once restrictions expire, CPR jumps significantly.</li>
+  <li><strong>Seasoning matters enormously:</strong> Remaining term and loan age are the top two predictors.
+      Loans within 5 years of maturity have elevated prepay rates (balloon risk, refinance timing).</li>
+  <li><strong>Size effect:</strong> Larger loans (higher UPB, more units) prepay faster, likely because
+      larger borrowers have more refinancing options and greater financial sophistication.</li>
+  <li><strong>Geography and program type:</strong> Certain states (IN, IL, MN) and FHA programs show
+      distinct prepayment profiles, likely driven by local market conditions and program-specific rules.</li>
+  <li><strong>Model limitations:</strong> With only 902 voluntary prepayments across 352K eligible observations,
+      the event rate is low (0.26% SMM). The model achieves AUC 0.72 on out-of-time test data, indicating
+      meaningful predictive power but room for improvement with more history or exogenous rate data.</li>
+</ol>
+</div>
+
+<div class="footer">
+  Generated from GNMA multifamily loan data &middot; 24 monthly periods (Apr 2024 &ndash; Mar 2026)<br>
+  Analysis uses XGBoost + SHAP for interpretable ML-based prepayment modeling
+</div>
+
+</div>
+
+<script>
+// ── Chart configurations ────────────────────────────────────
+
+const COLORS = {
+  blue: '#2563eb', red: '#dc2626', green: '#16a34a', amber: '#f59e0b',
+  purple: '#7c3aed', teal: '#0d9488'
+};
+
+// 2a. Refi S-curve (empirical)
+new Chart(document.getElementById('chart_scurve_refi'), {
+  type: 'line',
+  data: {
+    labels: [-462.5, -437.5, -412.5, -387.5, -362.5, -337.5, -312.5, -287.5, -262.5, -237.5, -212.5, -187.5, -162.5, -137.5, -112.5, -87.5, -62.5, -37.5, -12.5, 12.5, 37.5, 62.5, 87.5, 112.5, 137.5, 162.5, 187.5, 212.5, 237.5, 262.5, 287.5, 312.5, 337.5],
+    datasets: [{
+      label: 'Empirical CPR (%)',
+      data: [0.0, 0.0, 0.0, 0.61, 1.1, 1.28, 1.41, 2.06, 2.12, 4.35, 3.1, 4.04, 4.11, 4.26, 4.47, 3.72, 4.39, 2.31, 3.88, 2.86, 4.41, 4.87, 11.83, 3.37, 6.98, 1.56, 1.92, 12.47, 4.52, 9.71, 0.0, 0.0, 0.0],
+      borderColor: COLORS.blue,
+      backgroundColor: 'rgba(37,99,235,0.08)',
+      fill: true, tension: 0.3, pointRadius: 4, pointHoverRadius: 6
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      title: { display: true, text: 'Prepayment S-Curve: CPR vs Refi Incentive (bps)', font: { size: 14 } },
+      tooltip: {
+        callbacks: {
+          afterBody: function(ctx) {
+            const ns = [186, 1500, 5511, 13792, 20709, 24158, 24604, 25336, 26341, 27583, 27436, 26800, 24360, 20965, 17347, 13644, 10992, 8755, 6374, 4561, 3730, 3375, 3162, 2806, 2164, 1530, 1238, 997, 779, 472, 289, 203, 149];
+            return 'n = ' + ns[ctx[0].dataIndex].toLocaleString();
+          }
+        }
+      }
+    },
+    scales: {
+      x: { title: { display: true, text: 'Refi Incentive (bps)' } },
+      y: { title: { display: true, text: 'CPR (%)' }, min: 0 }
+    }
+  }
+});
+
+// 2b. Penalty status S-curves
+new Chart(document.getElementById('chart_scurve_penalty'), {
+  type: 'scatter',
+  data: {
+    datasets: [{
+            label: 'In Penalty Period',
+            data: [{"x": -462.5, "y": 0.0}, {"x": -437.5, "y": 0.0}, {"x": -412.5, "y": 0.0}, {"x": -387.5, "y": 0.61}, {"x": -362.5, "y": 1.1}, {"x": -337.5, "y": 1.29}, {"x": -312.5, "y": 1.22}, {"x": -287.5, "y": 1.12}, {"x": -262.5, "y": 1.52}, {"x": -237.5, "y": 3.03}, {"x": -212.5, "y": 2.5}, {"x": -187.5, "y": 2.82}, {"x": -162.5, "y": 3.08}, {"x": -137.5, "y": 2.47}, {"x": -112.5, "y": 2.76}, {"x": -87.5, "y": 2.48}, {"x": -62.5, "y": 3.11}, {"x": -37.5, "y": 1.02}, {"x": -12.5, "y": 1.73}, {"x": 12.5, "y": 1.37}, {"x": 37.5, "y": 1.42}, {"x": 62.5, "y": 2.94}, {"x": 87.5, "y": 2.5}, {"x": 112.5, "y": 1.69}, {"x": 137.5, "y": 11.28}, {"x": 162.5, "y": 0.0}, {"x": 187.5, "y": 0.0}, {"x": 212.5, "y": 20.09}, {"x": 237.5, "y": 0.0}, {"x": 262.5, "y": 6.99}, {"x": 287.5, "y": 0.0}],
+            borderColor: '#dc2626',
+            tension: 0.3, pointRadius: 3, fill: false
+        },
+            {
+            label: 'Past All Restrictions',
+            data: [{"x": -337.5, "y": 0.0}, {"x": -312.5, "y": 5.34}, {"x": -287.5, "y": 8.94}, {"x": -262.5, "y": 4.6}, {"x": -237.5, "y": 8.49}, {"x": -212.5, "y": 4.84}, {"x": -187.5, "y": 7.11}, {"x": -162.5, "y": 6.08}, {"x": -137.5, "y": 6.85}, {"x": -112.5, "y": 6.47}, {"x": -87.5, "y": 5.29}, {"x": -62.5, "y": 6.45}, {"x": -37.5, "y": 4.88}, {"x": -12.5, "y": 7.74}, {"x": 12.5, "y": 4.79}, {"x": 37.5, "y": 6.8}, {"x": 62.5, "y": 5.92}, {"x": 87.5, "y": 15.57}, {"x": 112.5, "y": 3.92}, {"x": 137.5, "y": 5.96}, {"x": 162.5, "y": 1.83}, {"x": 187.5, "y": 2.42}, {"x": 212.5, "y": 9.47}, {"x": 237.5, "y": 6.78}, {"x": 262.5, "y": 11.15}, {"x": 287.5, "y": 0.0}, {"x": 312.5, "y": 0.0}, {"x": 337.5, "y": 0.0}, {"x": 362.5, "y": 0.0}],
+            borderColor: '#2563eb',
+            tension: 0.3, pointRadius: 3, fill: false
+        }]
+  },
+  options: {
+    responsive: true,
+    showLine: true,
+    plugins: {
+      title: { display: true, text: 'CPR by Refi Incentive & Penalty Status', font: { size: 14 } }
+    },
+    scales: {
+      x: { title: { display: true, text: 'Refi Incentive (bps)' } },
+      y: { title: { display: true, text: 'CPR (%)' }, min: 0 }
+    }
+  }
+});
+
+// 2c. Model-implied S-curves
+new Chart(document.getElementById('chart_model_scurve'), {
+  type: 'line',
+  data: {
+        labels: [-500.0, -487.5, -475.0, -462.5, -450.0, -437.5, -425.0, -412.5, -400.0, -387.5, -375.0, -362.5, -350.0, -337.5, -325.0, -312.5, -300.0, -287.5, -275.0, -262.5, -250.0, -237.5, -225.0, -212.5, -200.0, -187.5, -175.0, -162.5, -150.0, -137.5, -125.0, -112.5, -100.0, -87.5, -75.0, -62.5, -50.0, -37.5, -25.0, -12.5, 0.0, 12.5, 25.0, 37.5, 50.0, 62.5, 75.0, 87.5, 100.0, 112.5, 125.0, 137.5, 150.0, 162.5, 175.0, 187.5, 200.0, 212.5, 225.0, 237.5, 250.0, 262.5, 275.0, 287.5, 300.0, 312.5, 325.0, 337.5, 350.0, 362.5, 375.0, 387.5, 400.0, 412.5, 425.0, 437.5, 450.0, 462.5, 475.0, 487.5, 500.0, 512.5, 525.0, 537.5, 550.0, 562.5, 575.0, 587.5, 600.0, 612.5, 625.0, 637.5, 650.0, 662.5],
+        datasets: [{
+            label: 'Past All Restrictions',
+            data: [4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.1, 4.5, 4.24, 4.24, 4.18, 4.0, 3.68, 3.32, 3.47, 3.47, 5.33, 4.59, 2.85, 2.81, 4.01, 3.99, 4.25, 4.18, 3.88, 4.24, 4.35, 4.19, 4.05, 4.07, 4.22, 3.68, 3.2, 3.25, 3.44, 3.44, 3.48, 3.48, 3.48, 3.48, 3.48, 3.48, 3.48, 4.51, 4.51, 3.09, 3.09, 3.08, 3.03, 3.03, 3.03, 3.03, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08, 3.08],
+            borderColor: '#2563eb', tension: 0.3, pointRadius: 0, fill: false
+        }, {
+            label: 'In Penalty (5% pts)',
+            data: [3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.39, 3.72, 3.5, 3.5, 3.46, 3.31, 3.04, 2.74, 2.86, 2.87, 4.51, 3.88, 2.43, 2.4, 3.42, 3.4, 3.62, 3.57, 3.31, 3.61, 3.71, 3.57, 3.45, 3.47, 3.59, 3.14, 2.72, 2.77, 2.93, 2.93, 2.97, 2.97, 2.97, 2.97, 2.97, 2.97, 2.97, 3.76, 3.76, 2.57, 2.61, 2.65, 2.61, 2.61, 2.61, 2.61, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65, 2.65],
+            borderColor: '#dc2626', tension: 0.3, pointRadius: 0, fill: false, borderDash: [6,3]
+        }]
+    },
+  options: {
+    responsive: true,
+    plugins: {
+      title: { display: true, text: 'Model-Implied CPR vs Refi Incentive (Median Loan Profile)', font: { size: 14 } }
+    },
+    scales: {
+      x: { title: { display: true, text: 'Refi Incentive (bps)' } },
+      y: { title: { display: true, text: 'CPR (%)' }, min: 0 }
+    }
+  }
+});
+
+// 2d. Bar charts
+new Chart(document.getElementById('chart_age'), {
+  type: 'bar',
+  data: {
+        labels: ["0-2yr", "2-5yr", "5-10yr", "10-15yr", "15-20yr", "20yr+"],
+        datasets: [{ label: 'CPR %', data: [1.31, 1.02, 3.53, 6.35, 6.95, 7.16],
+            backgroundColor: 'rgba(37,99,235,0.7)', borderColor: '#2563eb', borderWidth: 1 }]
+    },
+  options: {
+    responsive: true,
+    plugins: { title: { display: true, text: 'CPR by Loan Age', font: { size: 14 } }, legend: { display: false } },
+    scales: { y: { title: { display: true, text: 'CPR (%)' }, min: 0 } }
+  }
+});
+
+new Chart(document.getElementById('chart_upb'), {
+  type: 'bar',
+  data: {
+        labels: ["<1M", "1-3M", "3-7M", "7-15M", "15-50M", "50M+"],
+        datasets: [{ label: 'CPR %', data: [4.69, 3.81, 3.96, 2.17, 1.17, 1.21],
+            backgroundColor: 'rgba(37,99,235,0.7)', borderColor: '#2563eb', borderWidth: 1 }]
+    },
+  options: {
+    responsive: true,
+    plugins: { title: { display: true, text: 'CPR by Loan Size (UPB)', font: { size: 14 } }, legend: { display: false } },
+    scales: { y: { title: { display: true, text: 'CPR (%)' }, min: 0 } }
+  }
+});
+
+new Chart(document.getElementById('chart_penpts'), {
+  type: 'bar',
+  data: {
+        labels: ["0%", "0-1%", "1-3%", "3-5%", "5-10%"],
+        datasets: [{ label: 'CPR %', data: [6.12, 3.3, 3.94, 2.4, 1.2],
+            backgroundColor: 'rgba(37,99,235,0.7)', borderColor: '#2563eb', borderWidth: 1 }]
+    },
+  options: {
+    responsive: true,
+    plugins: { title: { display: true, text: 'CPR by Penalty Points', font: { size: 14 } }, legend: { display: false } },
+    scales: { y: { title: { display: true, text: 'CPR (%)' }, min: 0 } }
+  }
+});
+
+new Chart(document.getElementById('chart_state'), {
+  type: 'bar',
+  data: {
+        labels: ["IN", "NY", "Other", "TX", "NC", "FL", "TN", "OH", "GA", "PA", "IL", "MI", "MD", "MN", "CA", "MA"],
+        datasets: [{ label: 'CPR %', data: [6.35, 4.76, 3.31, 3.09, 3.0, 2.94, 2.78, 2.59, 2.53, 2.47, 2.43, 2.37, 2.12, 2.05, 1.91, 1.81],
+            backgroundColor: 'rgba(37,99,235,0.7)', borderColor: '#2563eb', borderWidth: 1 }]
+    },
+  options: {
+    responsive: true, indexAxis: 'y',
+    plugins: { title: { display: true, text: 'CPR by State', font: { size: 14 } }, legend: { display: false } },
+    scales: { x: { title: { display: true, text: 'CPR (%)' }, min: 0 } }
+  }
+});
+
+// 3. Feature importance
+new Chart(document.getElementById('chart_feat_imp'), {
+  type: 'bar',
+  data: {
+        labels: ["past_all_restrictions", "remaining_term", "in_prepay_penalty", "loan_age_months", "prepay_penalty_points", "state_group_IN", "penalty_status_past_all", "log_upb", "state_group_Other", "loan_rate", "refi_incentive_bps", "state_group_OH", "is_affordable", "state_group_IL", "state_group_FL"],
+        datasets: [{ label: 'Gain Importance', data: [0.2791, 0.0739, 0.0626, 0.0359, 0.0331, 0.0317, 0.0315, 0.0284, 0.0255, 0.0241, 0.0234, 0.0231, 0.0229, 0.0223, 0.0218],
+            backgroundColor: 'rgba(37,99,235,0.7)' }]
+    },
+  options: {
+    responsive: true, indexAxis: 'y',
+    plugins: { title: { display: true, text: 'XGBoost Feature Importance (Gain)', font: { size: 14 } }, legend: { display: false } },
+    scales: { x: { min: 0 } }
+  }
+});
+
+new Chart(document.getElementById('chart_shap_imp'), {
+  type: 'bar',
+  data: {
+        labels: ["remaining_term", "log_upb", "loan_age_months", "num_units", "security_rate", "refi_incentive_bps", "prepay_penalty_points", "loan_rate", "state_group_Other", "state_group_IN", "pool_type_group_PN", "state_group_TX", "state_group_IL", "state_group_PA", "in_prepay_penalty"],
+        datasets: [{ label: 'Mean |SHAP|', data: [0.6233, 0.2614, 0.2342, 0.1635, 0.1482, 0.1289, 0.1252, 0.0929, 0.0647, 0.0499, 0.0346, 0.0252, 0.0198, 0.0183, 0.0165],
+            backgroundColor: 'rgba(220,38,38,0.7)' }]
+    },
+  options: {
+    responsive: true, indexAxis: 'y',
+    plugins: { title: { display: true, text: 'SHAP Feature Importance (Mean |SHAP|)', font: { size: 14 } }, legend: { display: false } },
+    scales: { x: { min: 0 } }
+  }
+});
+
+</script>
+</body>
+</html>
