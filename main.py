@@ -436,6 +436,14 @@ def load_plc_rates():
     return dict(zip(plc['yyyymm'], plc['PLC_Rate_BPS']))
 
 
+def parse_date_yyyymmdd(s):
+    """Parse YYYYMMDD or YYYYMM string to a comparable YYYYMM string."""
+    s = (s or '').strip()
+    if len(s) >= 6:
+        return s[:6]
+    return ''
+
+
 def parse_penalty_schedule(prepay_desc, max_entries=None):
     """Parse the declining penalty schedule from prepay_desc.
 
