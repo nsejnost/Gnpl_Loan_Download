@@ -24,7 +24,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "rm -rf gnma_mf_data/ && rm -f gnma_mf_scurve_dataset.xlsx gnma_mf_raw_data.csv && bash run.sh --email nsejnost@gmail.com --answer Red"
+args = "rm -rf gnma_mf_data/ && rm -f gnma_mf_raw_data.csv && bash run.sh --email nsejnost@gmail.com --answer Red"
 
 [workflows.workflow.metadata]
 outputType = "console"
