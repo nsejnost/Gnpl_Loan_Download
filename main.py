@@ -567,6 +567,9 @@ def build_analytics(monthly_data):
                 r.get('prepay_premium_period_yrs', 0),
                 period,
             )
+            # Cap at 10 — max possible in any standard GNMA MF declining schedule.
+            # Handles ~14 loans (0.08%) with garbled prepay_desc formats.
+            prepay_penalty_points = min(prepay_penalty_points, 10.0)
             r['prepay_penalty_points'] = round(prepay_penalty_points, 2)
 
             # Refi incentive calculation
