@@ -58,7 +58,7 @@ Ginnie Mae publishes monthly loan-level data for all multifamily (project loan) 
 │  Analytics (build_analytics)                                │
 │    → Lockout & penalty period status per loan-month          │
 │    → Prepayment flags (lockout loans excluded)              │
-│    → Refi incentive using 10yr Treasury + 70bps PLC spread  │
+│    → Refi incentive using GNMA PLC rates                    │
 │                                                             │
 │  Output: single CSV with all raw + computed fields           │
 └─────────────────────────────────────────────────────────────┘
@@ -135,7 +135,7 @@ The output file `gnma_mf_raw_data.csv` contains one row per loan per month. With
 | `in_prepay_penalty` | 1 if the loan is past lockout but still in its penalty period |
 | `past_all_restrictions` | 1 if the loan is past both lockout and penalty periods |
 | `prepay_penalty_points` | Years remaining in penalty period (used in refi incentive calc) |
-| `plc_rate` | Current PLC rate for this period (10yr Treasury + 70bps) |
+| `plc_rate_bps` | GNMA PLC rate for this period (basis points, from GnmaPlcRatesHistorical.csv) |
 | `refi_incentive_bps` | Refinance incentive in basis points (see formula below) |
 | `prepay_eligible` | 1 if the loan is eligible for prepayment analysis (not in lockout) |
 | `prepaid_voluntary` | 1 if the loan voluntarily prepaid this period |
@@ -151,17 +151,17 @@ Refi Incentive (bps) = Net Coupon (bps) - [ PLC Rate (bps) + (1 + Prepay Penalty
 
 Where:
 - **Net Coupon** = `loan_rate * 100` (the borrower's current note rate, in bps)
-- **PLC Rate** = monthly average 10yr Treasury yield + 70bps assumed spread, in bps
+- **PLC Rate** = actual GNMA PLC rate for the period (from `GnmaPlcRatesHistorical.csv`, already in bps)
 - **Prepay Penalty Points** = years remaining in the prepay penalty period
 - **12.5** = cost multiplier per penalty point (in bps)
 
-**Example:** A loan with a 5.00% net coupon, 8 penalty points remaining, and a 4.00% PLC rate:
+**Example:** A loan with a 5.00% net coupon, 8 penalty points remaining, and a PLC rate of 400 bps:
 ```
 500 - (400 + (1 + 8) * 12.5) = 500 - 512.5 = -12.5 bps
 ```
 A negative refi incentive means refinancing is not economically attractive after accounting for the penalty cost.
 
-The PLC rate is derived from `10yrTsyRates.csv` (daily FRED DGS10 data, averaged to monthly). To change the spread assumption, edit `PLC_SPREAD_BPS` in `main.py`.
+The PLC rates come from `GnmaPlcRatesHistorical.csv`, which contains actual GNMA-published monthly PLC rates. To update with new months, add rows to this CSV.
 
 ## Prepayment Identification Logic
 
@@ -211,10 +211,10 @@ After auth, cookies are transferred to a `requests.Session` for fast bulk downlo
 ## Architecture & File Inventory
 
 | File | Purpose |
-|------|---------|------|
+|------|---------|
 | `main.py` | Main script: auth, download, parse, analytics, CSV output |
 | `run.sh` | Shell wrapper: installs pip deps, checks Firefox, calls main.py |
-| `10yrTsyRates.csv` | Daily 10yr Treasury rates (FRED DGS10) for PLC rate calculation |
+| `GnmaPlcRatesHistorical.csv` | Monthly GNMA PLC rates (bps) for refi incentive calculation |
 | `gnma_mf_raw_data.csv` | Output: enriched loan-month panel dataset |
 | `requirements.txt` | Python dependencies: requests, pandas, numpy, playwright |
 | `.replit` | Replit Run button configuration |
@@ -229,7 +229,7 @@ After auth, cookies are transferred to a `requests.Session` for fast bulk downlo
 | `authenticate_gnma()` | Playwright Firefox auth flow, returns `requests.Session` with cookies |
 | `download_files()` | Downloads mfplmon3 zips using the authenticated session |
 | `read_mfplmon3()` | Parses V3.3 pipe-delimited file into list of dicts |
-| `load_treasury_rates()` | Reads `10yrTsyRates.csv`, returns monthly average rates |
+| `load_plc_rates()` | Reads `GnmaPlcRatesHistorical.csv`, returns monthly PLC rates in bps |
 | `build_analytics()` | Adds lockout/penalty status, prepayment flags, refi incentive |
 | `write_csv()` | Writes enriched DataFrame to `gnma_mf_raw_data.csv` |
 
@@ -281,5 +281,4 @@ age_months = (period_year - first_pay_year) * 12 + (period_month - first_pay_mon
 
 - **GNMA form field IDs are hardcoded** — the SharePoint web part GUID could change if GNMA redesigns their site. Fallback CSS selectors exist but haven't been tested against a redesign.
 - **Terminated pools not tracked** — pools where all loans prepay and the pool is removed entirely from mfplmon3 could be captured via the separate `mftermpools` file.
-- **PLC spread is assumed** — the 70bps spread over 10yr Treasury is a market convention estimate. Actual PLC rates vary by program and market conditions.
-- **Treasury rate file needs periodic updates** — `10yrTsyRates.csv` must be manually updated with new FRED DGS10 data as new periods are added.
+- **PLC rate file needs periodic updates** — `GnmaPlcRatesHistorical.csv` must be updated with new monthly PLC rates as they are published.
