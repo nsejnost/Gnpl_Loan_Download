@@ -20,9 +20,11 @@ fi
 
 python3 main.py "$@"
 
-# Show output summary if gzipped CSV was created
-if [ -f gnma_mf_raw_data.csv.gz ]; then
+# Show output summary for the latest timestamped file
+LATEST=$(ls -t gnma_mf_raw_data_*.csv.gz 2>/dev/null | head -1)
+if [ -n "$LATEST" ]; then
     echo ""
-    echo "[verify] File size: $(ls -lh gnma_mf_raw_data.csv.gz | awk '{print $5}')"
-    echo "[verify] To open in pandas: pd.read_csv('gnma_mf_raw_data.csv.gz')"
+    echo "[verify] Output: $LATEST"
+    echo "[verify] File size: $(ls -lh "$LATEST" | awk '{print $5}')"
+    echo "[verify] To open in pandas: pd.read_csv('$LATEST')"
 fi
