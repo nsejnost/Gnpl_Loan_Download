@@ -515,8 +515,10 @@ def build_analytics(monthly_data):
             rm = r.get('removal_reason', '').strip()
             mdq = r.get('months_dq', 0) or 0
 
-            if in_lockout:
-                # Loans in lockout are excluded from prepayment calculations
+            if in_lockout or r.get('pool_type', '') in ('CL', 'CS'):
+                # Loans in lockout or construction (CL/CS) are excluded from
+                # prepayment calculations. CL/CS loans convert to PN on
+                # construction completion — their disappearance is not a prepay.
                 r['prepaid_voluntary'] = 0
                 r['prepaid_involuntary'] = 0
                 r['prepay_eligible'] = 0
