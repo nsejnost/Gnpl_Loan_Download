@@ -1,193 +1,248 @@
-# GNMA Multifamily Loan Data Downloader & Prepayment S-Curve Builder
+# GNMA Multifamily Loan Data Downloader & Prepayment Analyzer
 
-## Goal
+Automated tool that authenticates with Ginnie Mae's gated Disclosure Data Download site, bulk-downloads monthly multifamily loan-level portfolio files (`mfplmon3`), and produces a single enriched CSV with prepayment flags, lockout/penalty status, and refinance incentive calculations — ready for S-curve estimation.
 
-Build a historical loan-level panel dataset of all Ginnie Mae multifamily (project loan) MBS pools, suitable for estimating a prepayment S-curve. The tool should:
+## Quick Start
 
-1. **Authenticate** with the GNMA Disclosure Data Download website (which requires email + security question — no public API exists)
-2. **Download** monthly multifamily portfolio files (`mfplmon3_YYYYMM.zip`) in bulk
-3. **Parse** the pipe-delimited V3.3 format (31 pool-level fields + 44 loan-level fields per record)
-4. **Track loans across months** to identify which loans prepaid (voluntary payoff vs involuntary removal)
-5. **Output** a structured Excel workbook with summary stats, S-curve rate buckets, lockout analysis, and a full loan-month panel
+### On Replit (recommended)
+1. Open the project in Replit
+2. Hit the **Run** button — it handles everything automatically
+3. Output: `gnma_mf_raw_data.csv` (~15,000 loans x 12 months)
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      run.sh                              │
-│  - Discovers nix library paths for Firefox               │
-│  - Sets LD_LIBRARY_PATH                                  │
-│  - Calls main.py with all arguments                      │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────────┐
-│                     main.py                              │
-│                                                          │
-│  Phase 1: Auth + Download                                │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ Playwright (Firefox headless)                      │  │
-│  │  Step 1: Navigate to GNMA download page            │  │
-│  │  Step 2: Fill email → submit (ASP.NET postback)    │  │
-│  │  Step 3: Fill security answer → submit             │  │
-│  │  Step 4: Extract cookies → transfer to requests    │  │
-│  └────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ requests (with stolen cookies)                     │  │
-│  │  Download mfplmon3_YYYYMM.zip files from           │  │
-│  │  bulk.ginniemae.gov/protectedfiledownload.aspx     │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                          │
-│  Phase 2: Parse + Build (LD_LIBRARY_PATH cleared)        │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ Parse mfplmon3 V3.3 pipe-delimited files           │  │
-│  │ Build loan-month panel                             │  │
-│  │ Identify prepayments (month-over-month tracking)   │  │
-│  │ Write Excel (pandas ExcelWriter only, no XML)      │  │
-│  └────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+### On any machine
+```bash
+pip install -r requirements.txt
+python3 -m playwright install firefox
+bash run.sh --email you@email.com --answer "YourSecurityAnswer"
 ```
 
-## Key Data Sources
+### Parse already-downloaded files (no browser needed)
+```bash
+bash run.sh --skip-download
+# or directly:
+python3 main.py --skip-download --data-dir ./my_files
+```
 
-| Source | URL | Auth Required | What It Provides |
-|--------|-----|---------------|------------------|
-| Disclosure Data Download | `ginniemae.gov/data_and_reports/disclosure_data/Pages/datadownload_bulk.aspx` | Yes (email + security Q) | Monthly `mfplmon3` pool/loan files |
-| Bulk File Server | `bulk.ginniemae.gov/protectedfiledownload.aspx?dlfile=data_bulk/mfplmon3_YYYYMM.zip` | Yes (session cookie) | Direct zip download |
-| MF Database Search | `structuredginniemaes.ginniemae.gov/multifam/` | No | Individual pool lookup (no bulk/API) |
-| Disclosure Data Search | `ginniemae.gov/investors/investor_search_tools/Pages/default.aspx` | No | REMIC CUSIP → collateral mapping |
+### CLI options
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--email` | (prompted) | GNMA Disclosure site email |
+| `--answer` | (prompted) | Security question answer |
+| `--months` | 12 | Number of monthly files to download |
+| `--skip-download` | false | Skip auth/download, parse existing files only |
+| `--data-dir` | `./gnma_mf_data` | Directory for downloaded zip files |
 
-**All bulk download endpoints require authentication.** There is no public API. The download page uses ASP.NET with a two-step auth flow (email, then security question on a second page load).
+## What This Tool Does
 
-## GNMA Authentication Flow (Discovered via Playwright Inspection)
+Ginnie Mae publishes monthly loan-level data for all multifamily (project loan) MBS pools, but there is **no public API** — the data sits behind a gated website that requires email + security question authentication, with forms rendered by SharePoint JavaScript. This tool automates the entire pipeline:
 
-The GNMA Disclosure site uses a SharePoint/ASP.NET profile page at `ginniemae.gov/Pages/profile.aspx`. The auth is a **two-step form submission**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Phase 1: Authentication & Download                         │
+│                                                             │
+│  Playwright Firefox (headless)                              │
+│    → Navigate to GNMA profile page                          │
+│    → Fill email → ASP.NET postback                          │
+│    → Fill security answer → postback                        │
+│    → Extract session cookies                                │
+│                                                             │
+│  requests (with session cookies)                            │
+│    → Bulk download mfplmon3_YYYYMM.zip files                │
+│    → Cached locally — skips already-downloaded files         │
+├─────────────────────────────────────────────────────────────┤
+│  Phase 2: Parse & Enrich                                    │
+│                                                             │
+│  Parse mfplmon3 V3.3 pipe-delimited format                  │
+│    → 31 pool-level fields + 44 loan-level fields per record │
+│                                                             │
+│  Analytics (build_analytics)                                │
+│    → Lockout & penalty period status per loan-month          │
+│    → Prepayment flags (lockout loans excluded)              │
+│    → Refi incentive using 10yr Treasury + 70bps PLC spread  │
+│                                                             │
+│  Output: single CSV with all raw + computed fields           │
+└─────────────────────────────────────────────────────────────┘
+```
 
-1. **Step 1 — Email**: The page loads with an email text input. The field name contains `tbemailaddress` (case-insensitive). Submit via the first visible `input[type="submit"]`. This triggers an ASP.NET postback.
+## Output CSV: Column Reference
 
-2. **Step 2 — Security Answer**: After the email postback, the page reloads with a new text input for the security answer. The exact field ID discovered:
-   - Answer input: `#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_tbAnswer`
-   - Submit button: `#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_btnAnswerSecret`
-   
-   **Note**: These IDs contain a SharePoint web part GUID (`174dfd7c-a193-4313-a2ed-0005c00273fc`). If GNMA redesigns the page, these IDs will change. The code has fallback selectors (`input[name*="Answer" i]`).
+The output file `gnma_mf_raw_data.csv` contains one row per loan per month. With 12 months of history and ~15,400 loans/month, expect ~185,000 rows.
 
-3. **After auth**: The browser is redirected to the original download page. Cookies are extracted and transferred to a `requests.Session` for fast bulk downloads.
+### Raw Fields (parsed from mfplmon3)
 
-**Why not just use `requests`?** The profile page requires JavaScript to render the form fields. A plain `requests.get()` returns HTML with no visible input fields — they're injected by SharePoint's JS framework. This is why Playwright (real browser) is required for auth.
+**Pool-level fields:**
+| Column | Description |
+|--------|-------------|
+| `pool_cusip` | 9-character CUSIP identifier for the pool |
+| `pool_number` | GNMA pool number |
+| `pool_type` | Pool type code: PL, PN, LM, LS, RX, CL, CS |
+| `pool_type_name` | Human-readable pool type (e.g., "Project Loan") |
+| `security_rate` | Pass-through coupon rate on the security (%) |
+| `issue_date` | Pool issuance date (YYYYMMDD) |
+| `pool_maturity_date` | Pool maturity date (YYYYMMDD) |
+| `orig_agg_amount` | Original aggregate pool amount ($) |
+| `issuer_number` | GNMA issuer/servicer number |
+| `issuer_name` | Issuer/servicer name |
+| `pool_upb` | Current pool unpaid principal balance ($) |
+| `security_rpb` | Remaining principal balance of the security ($) |
+| `rpb_factor` | RPB factor (current RPB / original face) |
 
-## File Format: mfplmon3 (V3.3)
+**Loan-level fields:**
+| Column | Description |
+|--------|-------------|
+| `loan_id` | Unique identifier: `pool_cusip` + `_` + `case_number` |
+| `case_number` | FHA/RD case number |
+| `agency_type` | Insuring agency (FHA, RD, etc.) |
+| `loan_type` | Loan type code |
+| `loan_term` | Original loan term (months) |
+| `loan_rate` | Current note rate (%) — this is the "net coupon" for refi incentive |
+| `first_pay_date` | First payment date (YYYYMMDD) |
+| `loan_maturity_date` | Loan maturity date (YYYYMMDD) |
+| `origination_date` | Loan origination date (YYYYMMDD) |
+| `orig_prin_bal` | Original principal balance ($) |
+| `upb_at_issuance` | UPB at pool issuance ($) |
+| `upb` | Current unpaid principal balance ($) |
+| `lockout_term_yrs` | Lockout period length (years) |
+| `lockout_end_date` | Date lockout period ends (YYYYMMDD) |
+| `prepay_premium_period_yrs` | Prepayment penalty period length (years) |
+| `prepay_end_date` | Date penalty period ends (YYYYMMDD) |
+| `prepay_penalty_flag` | Penalty flag from GNMA |
+| `prepay_desc` | Prepayment protection description text |
+| `months_dq` | Months delinquent (0 = current) |
+| `removal_reason` | Reason for removal: 1=voluntary payoff, 2/3/4/6=involuntary |
+| `liquidation_flag` | Liquidation indicator |
+| `property_name` | Property name |
+| `property_city` | Property city |
+| `property_state` | Property state (2-letter) |
+| `msa` | Metropolitan Statistical Area code |
+| `num_units` | Number of housing units |
+| `pi_amount` | Monthly principal & interest payment ($) |
+| `fha_program_code` | FHA program (e.g., 223f, 221d4) |
+| `insurance_type` | Insurance type |
+| `green_status` | Green MBS indicator |
+| `affordable_status` | Affordable housing indicator |
+| `as_of_date` | Data as-of date from GNMA |
+| `modified_ind` | Modified loan indicator |
+| `non_level_ind` | Non-level payment indicator |
+| `mature_loan_flag` | Mature loan indicator |
+| `period` | Observation period (YYYYMM) |
 
-Pipe-delimited text file, one record per line. Each record contains pool-level data followed by loan-level data.
+### Computed Fields (added by `build_analytics()`)
 
-**Pool fields (P1–P31, indices 0–30):**
-- CUSIP, pool number, pool type (PL/PN/LM/LS/RX/CL/CS), security rate, issue date, maturity date, original amount, issuer info, UPB, delinquency counts (30/60/90 day), security RPB, factor
+| Column | Description |
+|--------|-------------|
+| `in_lockout` | 1 if the loan is currently in its lockout period (period < lockout_end_date) |
+| `in_prepay_penalty` | 1 if the loan is past lockout but still in its penalty period |
+| `past_all_restrictions` | 1 if the loan is past both lockout and penalty periods |
+| `prepay_penalty_points` | Years remaining in penalty period (used in refi incentive calc) |
+| `plc_rate` | Current PLC rate for this period (10yr Treasury + 70bps) |
+| `refi_incentive_bps` | Refinance incentive in basis points (see formula below) |
+| `prepay_eligible` | 1 if the loan is eligible for prepayment analysis (not in lockout) |
+| `prepaid_voluntary` | 1 if the loan voluntarily prepaid this period |
+| `prepaid_involuntary` | 1 if the loan was involuntarily removed this period |
 
-**Loan fields (L1–L44, indices 31–74):**
-- Case number, agency type, loan rate, term, maturity, origination date, lockout term/end date, prepay penalty period/end date, original balance, current UPB, delinquency months, removal reason, property info (name, city, state, MSA, units), FHA program code, green/affordable status
+## Refinance Incentive Calculation
 
-**Pool types included in S-curve (excludes CL/CS construction):**
-- PL: Level Payment Project Loan
-- PN: Non-Level Payment Project Loan  
-- LM: Mature/Modified Loan
-- LS: Small Project Loan
-- RX: Mark-to-Market
+The refi incentive measures how attractive it is for a borrower to refinance, accounting for the current prepayment penalty cost:
+
+```
+Refi Incentive (bps) = Net Coupon (bps) - [ PLC Rate (bps) + (1 + Prepay Penalty Points) * 12.5 ]
+```
+
+Where:
+- **Net Coupon** = `loan_rate * 100` (the borrower's current note rate, in bps)
+- **PLC Rate** = monthly average 10yr Treasury yield + 70bps assumed spread, in bps
+- **Prepay Penalty Points** = years remaining in the prepay penalty period
+- **12.5** = cost multiplier per penalty point (in bps)
+
+**Example:** A loan with a 5.00% net coupon, 8 penalty points remaining, and a 4.00% PLC rate:
+```
+500 - (400 + (1 + 8) * 12.5) = 500 - 512.5 = -12.5 bps
+```
+A negative refi incentive means refinancing is not economically attractive after accounting for the penalty cost.
+
+The PLC rate is derived from `10yrTsyRates.csv` (daily FRED DGS10 data, averaged to monthly). To change the spread assumption, edit `PLC_SPREAD_BPS` in `main.py`.
 
 ## Prepayment Identification Logic
 
-Loans are tracked by unique ID (`pool_cusip + "_" + case_number`) across consecutive months:
+Loans are tracked by `loan_id` across consecutive monthly periods. **Loans in their lockout period are excluded** from prepayment calculations (`prepay_eligible = 0`).
+
+For eligible loans:
 
 | Scenario | Flag |
 |----------|------|
-| `removal_reason = "1"` in current month | `prepaid_voluntary = 1` |
+| `removal_reason = "1"` | `prepaid_voluntary = 1` |
 | `removal_reason` in `("2","3","4","6")` | `prepaid_involuntary = 1` |
-| Loan exists in month T but not T+1, and `months_dq = 0` | `prepaid_voluntary = 1` |
-| Loan exists in month T but not T+1, and `months_dq > 0` | `prepaid_involuntary = 1` |
-| Loan in final period (no T+1 data) | Only explicit flags apply |
+| Loan in period T but not T+1, and `months_dq = 0` | `prepaid_voluntary = 1` |
+| Loan in period T but not T+1, and `months_dq > 0` | `prepaid_involuntary = 1` |
+| Loan in final period (no T+1 data) | Only explicit `removal_reason` flags apply |
 
-## Output Excel Tabs
+## Pool Types
 
-| Tab | Content |
-|-----|---------|
-| Instructions | Generation metadata, how to complete the S-curve |
-| Summary | Monthly aggregates: loan count, UPB, vol/invol prepays, CPR, WA rate, WA age, % lockout/penalty/open |
-| S-Curve Buckets | Prepayment rates by 25bp loan rate buckets (raw S-curve shape) |
-| Lockout Analysis | CPR segmented by in-lockout vs in-penalty vs open (key MF dimension) |
-| Loan Panel | Full loan-month panel with all S-curve variables (key columns) |
-| Full Detail | Every parsed field |
+| Code | Name | Included in Analysis |
+|------|------|---------------------|
+| PL | Level Payment Project Loan | Yes |
+| PN | Non-Level Payment Project Loan | Yes |
+| LM | Mature/Modified Loan | Yes |
+| LS | Small Project Loan | Yes |
+| RX | Mark-to-Market | Yes |
+| CL | Construction Loan (Same Issuer) | No (construction) |
+| CS | Construction Loan (Diff Issuer) | No (construction) |
 
-## S-Curve Completion (User Action Required)
+## Source Data: mfplmon3 (V3.3 format)
 
-The dataset includes `benchmark_rate` and `refi_incentive_bps` columns left blank. To complete:
+GNMA publishes monthly `mfplmon3_YYYYMM.zip` files containing pipe-delimited text with one record per loan. Each record has 31 pool-level fields (indices 0-30) followed by 44 loan-level fields (indices 31-74). The full field mapping is defined in the `P` and `L` dictionaries in `main.py`.
 
-1. Fill `benchmark_rate` with the prevailing GNMA MF coupon rate for each period (e.g., FHA 223(f) refinance rate, or 10yr Treasury + typical MF spread)
-2. Compute `refi_incentive_bps = (loan_rate - benchmark_rate) × 10000`
-3. Re-bucket by incentive instead of absolute rate
-4. Fit logistic: `P(prepay) = f(incentive, age, lockout_status, penalty_status, loan_size, ...)`
+| Source | URL | Auth |
+|--------|-----|------|
+| Disclosure Data Download | `ginniemae.gov/.../datadownload_bulk.aspx` | Email + security Q |
+| Bulk File Server | `bulk.ginniemae.gov/protectedfiledownload.aspx` | Session cookie |
 
-## Problems Encountered & Solutions
+## GNMA Authentication Details
 
-### Problem 1: No Public API
-**Issue**: GNMA has no REST API for bulk data. All download URLs (`bulk.ginniemae.gov/protectedfiledownload.aspx`) redirect to a login/profile page. Even `data.gov` links route back to the gated GNMA site.
+The GNMA site uses SharePoint/ASP.NET with JavaScript-rendered forms. A plain `requests.get()` returns HTML with no visible input fields — they're injected by SharePoint's JS framework. This is why Playwright with a real browser (Firefox) is required.
 
-**Solution**: Browser automation (Playwright) to complete the auth flow, then cookie transfer to `requests` for fast bulk downloads.
+The auth is a two-step form submission:
+1. **Email** — field name contains `tbemailaddress`
+2. **Security answer** — field ID contains a SharePoint web part GUID (`174dfd7c-a193-4313-a2ed-0005c00273fc`). The code has fallback CSS selectors in case this GUID changes.
 
-### Problem 2: ASP.NET JavaScript-Rendered Forms  
-**Issue**: `requests + BeautifulSoup` cannot find the form fields on the GNMA profile page because they're injected by SharePoint's JavaScript framework. The raw HTML contains no `<input>` elements for email/answer.
+After auth, cookies are transferred to a `requests.Session` for fast bulk downloads.
 
-**Solution**: Playwright with a real browser engine (Firefox) renders the JavaScript, making the form fields visible and fillable.
+## Architecture & File Inventory
 
-### Problem 3: Two-Step Auth Flow
-**Issue**: The GNMA profile page has a two-step flow (email → postback → security answer → postback). The initial script assumed a single-page form and tried to fill both fields at once, but after the email submit, the page reloads with completely different fields.
+| File | Purpose |
+|------|---------|------|
+| `main.py` | Main script: auth, download, parse, analytics, CSV output |
+| `run.sh` | Shell wrapper: installs pip deps, checks Firefox, calls main.py |
+| `10yrTsyRates.csv` | Daily 10yr Treasury rates (FRED DGS10) for PLC rate calculation |
+| `gnma_mf_raw_data.csv` | Output: enriched loan-month panel dataset |
+| `requirements.txt` | Python dependencies: requests, pandas, numpy, playwright |
+| `.replit` | Replit Run button configuration |
+| `replit.nix` | Nix system dependencies for Replit |
+| `.gitignore` | Excludes downloaded zip files, xlsx, and debug screenshots |
 
-**Solution**: Discovered via Playwright inspection that step 1 shows email fields and step 2 shows the answer field with specific ASP.NET control IDs. The script now waits for each postback before proceeding.
+### Key functions in `main.py`
 
-### Problem 4: Chromium Won't Launch on Replit (GLIBC Mismatch)
-**Issue**: Playwright's bundled Chromium requires `GLIBC_PRIVATE` symbols not present in Replit's system libc. Error: `version 'GLIBC_PRIVATE' not found`. This is a fundamental binary incompatibility — no amount of library installation fixes it.
+| Function | What it does |
+|----------|-------------|
+| `discover_nix_libs()` | Finds NixOS library paths for Firefox (Replit-specific) |
+| `authenticate_gnma()` | Playwright Firefox auth flow, returns `requests.Session` with cookies |
+| `download_files()` | Downloads mfplmon3 zips using the authenticated session |
+| `read_mfplmon3()` | Parses V3.3 pipe-delimited file into list of dicts |
+| `load_treasury_rates()` | Reads `10yrTsyRates.csv`, returns monthly average rates |
+| `build_analytics()` | Adds lockout/penalty status, prepayment flags, refi incentive |
+| `write_csv()` | Writes enriched DataFrame to `gnma_mf_raw_data.csv` |
 
-**Solution**: Switched from Chromium to **Firefox**, which has fewer system dependencies and doesn't hit the GLIBC mismatch.
+## Replit-Specific Notes
 
-### Problem 5: Missing Shared Libraries on Replit (Nix Store)
-**Issue**: Replit uses NixOS, which installs packages into `/nix/store/<hash>-<pkg>/lib/` instead of standard `/usr/lib/`. Firefox can't find `libnspr4.so`, `libgbm.so.1`, `libfontconfig.so.1`, `libgtk-3.so.0`, etc.
+**Why Firefox instead of Chromium?** Playwright's Chromium requires `GLIBC_PRIVATE` symbols not present in Replit's NixOS libc. Firefox works.
 
-**Solution**: 
-- Installed libs via `nix-env -iA nixpkgs.<pkg>` (nspr, nss, atk, cups, libdrm, gtk3, pango, cairo, fontconfig, freetype, gdk-pixbuf, etc.)
-- Created `run.sh` that discovers nix library paths and sets `LD_LIBRARY_PATH` before launching the script
-- The path discovery uses `ls -dt` (sorted by modification time) to find the latest `user-environment/lib`, plus targeted lookups for fontconfig, gtk3, gdk-pixbuf, and other libs that live in separate nix derivations
+**Nix library discovery:** Replit installs packages into `/nix/store/<hash>-<pkg>/lib/` instead of `/usr/lib/`. The `discover_nix_libs()` function scans `/nix/store` entries with Python's `os.listdir()` + substring filtering (instant) rather than shell globs (which hang on the tens of thousands of nix store entries).
 
-### Problem 6: Expat/XML Conflict During Excel Write
-**Issue**: The `LD_LIBRARY_PATH` set for Firefox pulls in a nix version of `libexpat` that conflicts with Python's built-in `pyexpat` module. When `openpyxl` calls `load_workbook()` (which uses XML parsing internally), it crashes with `ImportError: No module named expat`.
+**Firefox sandbox:** Replit containers don't support `CanCreateUserNamespace()`. Firefox sandbox is disabled via `MOZ_DISABLE_CONTENT_SANDBOX=1` and `security.sandbox.content.level: 0`.
 
-**Solution**: Two-part fix:
-1. `main.py` calls `os.environ.pop('LD_LIBRARY_PATH', None)` after the download phase completes but before the Excel writing phase
-2. `write_output()` was rewritten to use only `pandas.ExcelWriter` (write-only) instead of `openpyxl.load_workbook()` (read-back), eliminating all XML parsing from the output path
-
-### Problem 7: `find /nix/store` Is Extremely Slow
-**Issue**: Replit's `/nix/store` contains thousands of packages. Running `find /nix/store -name "libfoo.so"` takes minutes, making the `LD_LIBRARY_PATH` setup painfully slow.
-
-**Solution**: `run.sh` uses targeted `ls` globs (e.g., `ls /nix/store/*fontconfig*-lib/lib/libfontconfig.so.1`) instead of recursive `find`. This is near-instant because it uses filename pattern matching rather than directory traversal.
-
-## What Is Working
-
-- ✅ Firefox launches successfully on Replit
-- ✅ Two-step GNMA authentication (email → security answer)
-- ✅ Cookie transfer from Playwright to requests session
-- ✅ Bulk download of mfplmon3 zip files from bulk.ginniemae.gov
-- ✅ Parsing of mfplmon3 V3.3 pipe-delimited format (all 75 fields)
-- ✅ Loan tracking across months and prepayment identification
-- ✅ Excel output with Summary, S-Curve Buckets, Lockout Analysis, Loan Panel tabs
-- ✅ Tested with real data: 5 periods, ~15,400 records/month, 75,071 loan-month observations, 248 voluntary prepays, 10 involuntary removals
-
-## What May Need Attention
-
-- ⚠️ **GNMA form field IDs are hardcoded**: The SharePoint web part GUID in the answer field ID (`174dfd7c-a193-4313-a2ed-0005c00273fc`) could change if GNMA updates their site. Fallback selectors exist but haven't been tested against a redesign.
-- ⚠️ **Nix library paths are fragile**: Every `nix-env -iA` install creates a new `user-environment` hash. `run.sh` handles this by finding the latest one, but a complete Replit environment rebuild could require re-running `nix-env -iA` for all packages.
-- ⚠️ **`mfplmon3_202603.zip` was only 4 KB**: This suggests the March 2026 file may not have been fully released yet at download time, or the period doesn't exist. The parser silently skips files with no valid records.
-- ⚠️ **Benchmark rate not auto-populated**: The S-curve dataset requires the user to manually fill in the prevailing GNMA MF rate for each period. A future enhancement could pull Treasury rates automatically.
-- ⚠️ **No terminated pool tracking yet**: Pools that fully pay off (all loans prepay) and are removed from mfplmon3 entirely could be captured via the separate `mftermpools` file.
-
-## Replit One-Time Setup
-
+### First-time Replit setup
 ```bash
-# Install system dependencies via nix
 nix-env -iA nixpkgs.nspr nixpkgs.nss nixpkgs.atk nixpkgs.cups \
   nixpkgs.libdrm nixpkgs.xorg.libX11 nixpkgs.gtk3 nixpkgs.pango \
   nixpkgs.cairo nixpkgs.mesa.drivers nixpkgs.alsa-lib nixpkgs.dbus \
@@ -196,35 +251,35 @@ nix-env -iA nixpkgs.nspr nixpkgs.nss nixpkgs.atk nixpkgs.cups \
   nixpkgs.xorg.libXfixes nixpkgs.xorg.libXrandr nixpkgs.xorg.libxcb \
   nixpkgs.fontconfig nixpkgs.freetype nixpkgs.gdk-pixbuf \
   nixpkgs.xorg.libXrender
-
-# Install Firefox for Playwright
 python3 -m playwright install firefox
 ```
 
-## Usage
+## Using the Output for S-Curve Analysis
 
-```bash
-# Download 6 months + build dataset
-bash run.sh --email nsejnost@gmail.com --answer "Red"
+The CSV contains everything needed to estimate a multifamily prepayment S-curve:
 
-# Download 12 months
-bash run.sh --email nsejnost@gmail.com --answer "Red" --months 12
+1. **Filter** to `prepay_eligible = 1` (excludes lockout loans)
+2. **Group** by `refi_incentive_bps` buckets (e.g., 25bps or 50bps bins)
+3. **Compute CPR** per bucket: `CPR = 1 - (1 - prepaid_voluntary/n)^12`
+4. **Plot** CPR vs refi incentive — this is the S-curve
+5. **Segment** by `in_prepay_penalty` vs `past_all_restrictions`, `property_state`, `fha_program_code`, `green_status`, loan age, etc.
+6. **Fit** a logistic model: `P(prepay) = f(refi_incentive, age, penalty_status, loan_size, ...)`
 
-# Parse already-downloaded files (no browser needed)
-bash run.sh --skip-download
-
-# Use custom data directory
-python3 main.py --skip-download --data-dir /path/to/files
+### Computing SMM from the raw data
+For loans appearing in consecutive periods:
+```
+SMM = 1 - (upb_T+1 / upb_T)
+CPR = 1 - (1 - SMM)^12
 ```
 
-## File Inventory
+### Loan age
+```
+age_months = (period_year - first_pay_year) * 12 + (period_month - first_pay_month)
+```
 
-| File | Purpose |
-|------|---------|
-| `main.py` | Main script: auth, download, parse, panel construction, Excel output |
-| `run.sh` | Shell wrapper: nix library discovery, LD_LIBRARY_PATH setup, runs main.py |
-| `requirements.txt` | Python dependencies (requests, pandas, openpyxl, playwright, etc.) |
-| `.replit` | Replit run button configuration |
-| `replit.nix` | Nix system dependencies declaration (may not take effect on all Replit plans) |
-| `.gitignore` | Excludes downloaded data files, xlsx output, debug screenshots from git |
-| `README.md` | This file |
+## Known Limitations
+
+- **GNMA form field IDs are hardcoded** — the SharePoint web part GUID could change if GNMA redesigns their site. Fallback CSS selectors exist but haven't been tested against a redesign.
+- **Terminated pools not tracked** — pools where all loans prepay and the pool is removed entirely from mfplmon3 could be captured via the separate `mftermpools` file.
+- **PLC spread is assumed** — the 70bps spread over 10yr Treasury is a market convention estimate. Actual PLC rates vary by program and market conditions.
+- **Treasury rate file needs periodic updates** — `10yrTsyRates.csv` must be manually updated with new FRED DGS10 data as new periods are added.
