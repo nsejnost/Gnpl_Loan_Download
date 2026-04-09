@@ -436,7 +436,75 @@ def load_plc_rates():
     return dict(zip(plc['yyyymm'], plc['PLC_Rate_BPS']))
 
 
-def parse_date_yyyymmdd(s):
+def parse_penalty_schedule(prepay_desc, max_entries=None):
+    """Parse the declining penalty schedule from prepay_desc.
+
+    Handles various formats found in GNMA data:
+      '10,9,8,7,6,5,4,3,2,1,0'
+      '10, 10, 8, 7, 6, 5, 4, 3, 2, 1, 0'
+      '10/9/8/7/6/5/4/3/2/1% THRU 9/1/2034'
+      '0 LOCK, THEN 10,9,8,7,6,5,4,3,2,1,0'
+      '0: 10,9,8,7,6,5,4,3,2,1,0'
+
+    Returns a list of penalty percentages by year, e.g. [10, 9, 8, ...].
+    max_entries truncates stray numbers from dates embedded in the string.
+    """
+    s = (prepay_desc or '').strip()
+    if not s:
+        return []
+    # Strip text after keywords that introduce dates (e.g., "THRU 9/1/2034")
+    for kw in ['THRU', 'THROUGH', 'UNTIL', 'ENDING']:
+        idx = s.upper().find(kw)
+        if idx >= 0:
+            s = s[:idx]
+    # Extract all numbers (int or float) from the cleaned string
+    nums = re.findall(r'\d+(?:\.\d+)?', s)
+    if not nums:
+        return []
+    schedule = [float(n) for n in nums]
+    # Filter out 4-digit years and large non-penalty numbers
+    schedule = [n for n in schedule if n <= 100]
+    # Truncate to expected length if provided (period_yrs + 1 for the trailing 0)
+    if max_entries and len(schedule) > max_entries:
+        schedule = schedule[:max_entries]
+    return schedule
+
+
+def get_current_penalty_points(prepay_desc, prepay_end_yyyymm, prepay_premium_period_yrs, period):
+    """Determine the current prepayment penalty percentage for a loan.
+
+    Uses the declining schedule from prepay_desc to look up the penalty
+    based on which year of the penalty period the loan is currently in.
+    Falls back to years-remaining if the schedule can't be parsed.
+    """
+    if not prepay_end_yyyymm or period >= prepay_end_yyyymm:
+        return 0.0
+
+    try:
+        pe_yr = int(prepay_end_yyyymm[:4])
+        pe_mo = int(prepay_end_yyyymm[4:6])
+        p_yr = int(period[:4])
+        p_mo = int(period[4:6])
+        months_remaining = (pe_yr - p_yr) * 12 + (pe_mo - p_mo)
+    except (ValueError, IndexError):
+        return 0.0
+
+    total_period_yrs = prepay_premium_period_yrs or 0
+    max_entries = total_period_yrs + 1 if total_period_yrs > 0 else None
+    schedule = parse_penalty_schedule(prepay_desc, max_entries)
+
+    if schedule and total_period_yrs > 0:
+        # Which year of the penalty period are we in? (0-indexed)
+        total_months = total_period_yrs * 12
+        months_elapsed = max(0, total_months - months_remaining)
+        year_index = min(int(months_elapsed / 12), len(schedule) - 1)
+        return schedule[year_index]
+    else:
+        # Fallback: use years remaining (capped at total period)
+        years_remaining = months_remaining / 12.0
+        if total_period_yrs > 0:
+            return min(years_remaining, total_period_yrs)
+        return years_remaining
     """Parse YYYYMMDD or YYYYMM string to a comparable YYYYMM string."""
     s = (s or '').strip()
     if len(s) >= 6:
@@ -483,19 +551,13 @@ def build_analytics(monthly_data):
             r['in_prepay_penalty'] = in_penalty
             r['past_all_restrictions'] = 1 if not in_lockout and not in_penalty else 0
 
-            # Current prepay penalty points (years remaining * 1 point/year, floored at 0)
-            if prepay_end_yyyymm and period < prepay_end_yyyymm:
-                try:
-                    pe_yr = int(prepay_end_yyyymm[:4])
-                    pe_mo = int(prepay_end_yyyymm[4:6])
-                    p_yr = int(period[:4])
-                    p_mo = int(period[4:6])
-                    months_remaining = (pe_yr - p_yr) * 12 + (pe_mo - p_mo)
-                    prepay_penalty_points = max(months_remaining / 12.0, 0)
-                except (ValueError, IndexError):
-                    prepay_penalty_points = 0.0
-            else:
-                prepay_penalty_points = 0.0
+            # Current prepay penalty points from declining schedule in prepay_desc
+            prepay_penalty_points = get_current_penalty_points(
+                r.get('prepay_desc', ''),
+                prepay_end_yyyymm,
+                r.get('prepay_premium_period_yrs', 0),
+                period,
+            )
             r['prepay_penalty_points'] = round(prepay_penalty_points, 2)
 
             # Refi incentive calculation
