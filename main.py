@@ -82,7 +82,8 @@ GNMA_EMAIL_SELECTOR = 'input[name*="tbemailaddress" i]'
 GNMA_ANSWER_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_tbAnswer'
 GNMA_ANSWER_SUBMIT_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_btnAnswerSecret'
 
-OUTPUT_CSV = os.path.join(SCRIPT_DIR, "gnma_mf_raw_data.csv.gz")
+TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_CSV = os.path.join(SCRIPT_DIR, f"gnma_mf_raw_data_{TIMESTAMP}.csv.gz")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -657,7 +658,7 @@ def main():
     global DATA_DIR, OUTPUT_CSV
     if args.data_dir:
         DATA_DIR = args.data_dir
-        OUTPUT_CSV = os.path.join(args.data_dir, "gnma_mf_raw_data.csv.gz")
+        OUTPUT_CSV = os.path.join(args.data_dir, f"gnma_mf_raw_data_{TIMESTAMP}.csv.gz")
 
     print("""
 +==============================================================+
