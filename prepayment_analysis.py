@@ -8,13 +8,22 @@ and attribute prepayment probability to loan characteristics.
 import pandas as pd
 import numpy as np
 import json
+import glob
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
 # ── 1. Load & Preprocess ────────────────────────────────────────────────────
 
-print("Loading data...")
-df = pd.read_csv('gnma_mf_raw_data_20260409_210737.csv.gz', compression='gzip')
+# Auto-detect the most recent gnma_mf_raw_data_*.csv.gz file (matches run.sh)
+csv_files = sorted(glob.glob('gnma_mf_raw_data_*.csv.gz'),
+                   key=os.path.getmtime, reverse=True)
+if not csv_files:
+    raise FileNotFoundError(
+        "No gnma_mf_raw_data_*.csv.gz files found. Run main.py first.")
+INPUT_CSV = csv_files[0]
+print(f"Loading data from {INPUT_CSV}...")
+df = pd.read_csv(INPUT_CSV, compression='gzip')
 print(f"  Loaded {len(df):,} rows, {df['period'].nunique()} periods, "
       f"{df['loan_id'].nunique():,} unique loans")
 
