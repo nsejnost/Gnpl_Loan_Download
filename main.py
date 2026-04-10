@@ -281,16 +281,69 @@ def get_file_list(months=6):
     return files[:months]
 
 
+def _validate_mfplmon_zip(filepath):
+    """Verify a downloaded file is a real mfplmon3 zip with content.
+
+    GNMA's SharePoint server returns small (~4 KB) HTML error pages instead
+    of HTTP errors when a requested mfplmon3 file does not exist (e.g. for
+    months before the V3.3 format was introduced in late 2023). Those pages
+    bypass any size-based check, so we instead try to open the file as a zip
+    and verify it contains a recognizable mfplmon entry.
+
+    Returns (is_valid, reason). is_valid is True if the file is a real
+    mfplmon3 zip; reason is a short explanation when invalid.
+    """
+    try:
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            names = zf.namelist()
+            if not names:
+                return False, "empty zip"
+            # Look for an mfplmon-like text entry
+            has_mfplmon = any(
+                ('mfplmon' in n.lower()) or n.lower().endswith('.txt')
+                for n in names
+            )
+            if not has_mfplmon:
+                return False, f"no mfplmon entry (contents: {names[:3]})"
+            # Sanity check: the inner file should have non-trivial size
+            for n in names:
+                if 'mfplmon' in n.lower() or n.lower().endswith('.txt'):
+                    info = zf.getinfo(n)
+                    if info.file_size < 10000:
+                        return False, f"inner file too small ({info.file_size} bytes)"
+                    return True, "ok"
+            return False, "no readable mfplmon entry"
+    except zipfile.BadZipFile:
+        # Not a valid zip — most likely an HTML error page
+        try:
+            with open(filepath, 'r', errors='replace') as chk:
+                head = chk.read(300).lower()
+            if '<html' in head or '<!doctype' in head:
+                return False, "HTML error page (file not on server)"
+        except Exception:
+            pass
+        return False, "not a valid zip"
+    except Exception as e:
+        return False, f"validation error: {e}"
+
+
 def download_files(session, months=6):
     os.makedirs(DATA_DIR, exist_ok=True)
     files = get_file_list(months)
     print(f"\n[download] Downloading {len(files)} files to {DATA_DIR}\n")
     downloaded = 0
+    missing_periods = []
     for f in files:
         dest = os.path.join(DATA_DIR, f["filename"])
         if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-            print(f"  ok {f['filename']} (cached, {os.path.getsize(dest)//1024} KB)")
-            downloaded += 1; continue
+            # Re-validate cached files so old bad downloads are caught
+            ok, reason = _validate_mfplmon_zip(dest)
+            if ok:
+                print(f"  ok {f['filename']} (cached, {os.path.getsize(dest)//1024} KB)")
+                downloaded += 1; continue
+            else:
+                print(f"  ! {f['filename']} cached but invalid ({reason}); re-downloading")
+                os.remove(dest)
         try:
             r = session.get(f["url"], timeout=120, stream=True, allow_redirects=True)
             if "profile" in r.url.lower():
@@ -299,7 +352,8 @@ def download_files(session, months=6):
             if "text/html" in ct and "profile" in (r.text[:500] if hasattr(r,'text') else "").lower():
                 print(f"  x {f['filename']} — login redirect"); continue
             if r.status_code != 200:
-                print(f"  x {f['filename']} — HTTP {r.status_code}"); continue
+                print(f"  x {f['filename']} — HTTP {r.status_code}")
+                missing_periods.append(f["period"]); continue
             total = int(r.headers.get("Content-Length", 0))
             dl = 0
             with open(dest, "wb") as out:
@@ -309,17 +363,24 @@ def download_files(session, months=6):
                         print(f"\r  > {f['filename']} {dl//1024}/{total//1024} KB ({dl*100//total}%)",
                               end="", flush=True)
             sz = os.path.getsize(dest)
-            if sz < 1000:
-                with open(dest, 'r', errors='replace') as chk:
-                    if 'html' in chk.read(300).lower():
-                        os.remove(dest)
-                        print(f"\r  x {f['filename']} — was HTML" + " "*20); continue
+            # Validate the downloaded file is a real mfplmon3 zip with content
+            ok, reason = _validate_mfplmon_zip(dest)
+            if not ok:
+                os.remove(dest)
+                print(f"\r  x {f['filename']} — {reason} ({sz//1024} KB)" + " "*20)
+                missing_periods.append(f["period"]); continue
             print(f"\r  ok {f['filename']} — {sz//1024} KB" + " "*20)
             downloaded += 1
         except requests.RequestException as e:
             print(f"  x {f['filename']} — {e}")
+            missing_periods.append(f["period"])
         time.sleep(1)
     print(f"\n[download] {downloaded}/{len(files)} files downloaded")
+    if missing_periods:
+        print(f"[download] {len(missing_periods)} period(s) unavailable: "
+              f"{', '.join(sorted(missing_periods))}")
+        print(f"[download] Note: GNMA's mfplmon3 (V3.3) format only goes back to ~Dec 2023.")
+        print(f"[download]       Earlier months are not available under this filename.")
     return downloaded
 
 
