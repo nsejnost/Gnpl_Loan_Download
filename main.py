@@ -276,8 +276,17 @@ def get_file_list(months=6):
         dt = now - timedelta(days=30 * (i + 1))
         period = dt.strftime("%Y%m")
         fn = f"mfplmon3_{period}.zip"
-        url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile=data_bulk/{fn}"
-        files.append({"period": period, "filename": fn, "url": url})
+        # Recent files live under data_bulk/; older files are moved to
+        # data_history_cons/. The downloader will try data_bulk first and
+        # fall back to data_history_cons (URL-encoded backslash) on failure.
+        primary_url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile=data_bulk/{fn}"
+        fallback_url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile=data_history_cons%5C{fn}"
+        files.append({
+            "period": period,
+            "filename": fn,
+            "url": primary_url,
+            "fallback_url": fallback_url,
+        })
     return files[:months]
 
 
@@ -327,6 +336,41 @@ def _validate_mfplmon_zip(filepath):
         return False, f"validation error: {e}"
 
 
+def _attempt_download(session, url, dest, label):
+    """Try a single download URL. Returns (success, reason).
+
+    On success, the file is saved to `dest` and validated as a real mfplmon zip.
+    On failure, any partial file at `dest` is removed.
+    """
+    try:
+        r = session.get(url, timeout=120, stream=True, allow_redirects=True)
+        if "profile" in r.url.lower():
+            return False, "session expired"
+        ct = r.headers.get("Content-Type", "")
+        if "text/html" in ct and "profile" in (r.text[:500] if hasattr(r, 'text') else "").lower():
+            return False, "login redirect"
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code}"
+        total = int(r.headers.get("Content-Length", 0))
+        dl = 0
+        with open(dest, "wb") as out:
+            for chunk in r.iter_content(65536):
+                out.write(chunk); dl += len(chunk)
+                if total:
+                    print(f"\r  > {label} {dl//1024}/{total//1024} KB ({dl*100//total}%)",
+                          end="", flush=True)
+        ok, reason = _validate_mfplmon_zip(dest)
+        if not ok:
+            os.remove(dest)
+            return False, reason
+        return True, "ok"
+    except requests.RequestException as e:
+        if os.path.exists(dest):
+            try: os.remove(dest)
+            except OSError: pass
+        return False, f"{e}"
+
+
 def download_files(session, months=6):
     os.makedirs(DATA_DIR, exist_ok=True)
     files = get_file_list(months)
@@ -344,43 +388,27 @@ def download_files(session, months=6):
             else:
                 print(f"  ! {f['filename']} cached but invalid ({reason}); re-downloading")
                 os.remove(dest)
-        try:
-            r = session.get(f["url"], timeout=120, stream=True, allow_redirects=True)
-            if "profile" in r.url.lower():
-                print(f"  x {f['filename']} — session expired"); continue
-            ct = r.headers.get("Content-Type", "")
-            if "text/html" in ct and "profile" in (r.text[:500] if hasattr(r,'text') else "").lower():
-                print(f"  x {f['filename']} — login redirect"); continue
-            if r.status_code != 200:
-                print(f"  x {f['filename']} — HTTP {r.status_code}")
-                missing_periods.append(f["period"]); continue
-            total = int(r.headers.get("Content-Length", 0))
-            dl = 0
-            with open(dest, "wb") as out:
-                for chunk in r.iter_content(65536):
-                    out.write(chunk); dl += len(chunk)
-                    if total:
-                        print(f"\r  > {f['filename']} {dl//1024}/{total//1024} KB ({dl*100//total}%)",
-                              end="", flush=True)
+
+        # Try data_bulk first (recent months)
+        ok, reason = _attempt_download(session, f["url"], dest, f["filename"])
+        if not ok:
+            # Fall back to data_history_cons (older months)
+            print(f"\r  > {f['filename']} not in data_bulk ({reason}); trying data_history_cons..." + " "*20)
+            ok, reason = _attempt_download(session, f["fallback_url"], dest, f["filename"])
+
+        if ok:
             sz = os.path.getsize(dest)
-            # Validate the downloaded file is a real mfplmon3 zip with content
-            ok, reason = _validate_mfplmon_zip(dest)
-            if not ok:
-                os.remove(dest)
-                print(f"\r  x {f['filename']} — {reason} ({sz//1024} KB)" + " "*20)
-                missing_periods.append(f["period"]); continue
-            print(f"\r  ok {f['filename']} — {sz//1024} KB" + " "*20)
+            print(f"\r  ok {f['filename']} — {sz//1024} KB" + " "*40)
             downloaded += 1
-        except requests.RequestException as e:
-            print(f"  x {f['filename']} — {e}")
+        else:
+            print(f"\r  x {f['filename']} — {reason}" + " "*40)
             missing_periods.append(f["period"])
         time.sleep(1)
+
     print(f"\n[download] {downloaded}/{len(files)} files downloaded")
     if missing_periods:
         print(f"[download] {len(missing_periods)} period(s) unavailable: "
               f"{', '.join(sorted(missing_periods))}")
-        print(f"[download] Note: GNMA's mfplmon3 (V3.3) format only goes back to ~Dec 2023.")
-        print(f"[download]       Earlier months are not available under this filename.")
     return downloaded
 
 
@@ -395,6 +423,11 @@ def sf(s):
 def si(s):
     try: return int(float(s.strip())) if s and s.strip() else 0
     except: return 0
+
+# Expected number of fields in the V3.3 layout (indices 0..74).
+# V3.1 (May 2022 - Feb 2023) and V3.2 (Mar 2023 - May 2023) may have
+# different field counts; the parser detects this at runtime.
+V33_FIELD_COUNT = 75
 
 def read_mfplmon3(filepath):
     text = None
@@ -415,12 +448,26 @@ def read_mfplmon3(filepath):
             text = f.read()
     if not text: return []
 
+    # Detect field count of the first loan-level record so we can warn the
+    # user if the layout doesn't match V3.3 (loans before Jun 2023).
+    detected_field_count = None
+
     records = []
     for line in text.split('\n'):
         flds = line.rstrip('\r').split('|')
         if len(flds) < 32: continue
         cusip = flds[0].strip()
         if not cusip or len(cusip) != 9 or not cusip[0].isdigit(): continue
+        # Capture field count from the first loan-level record (which has
+        # the maximum number of fields). Pool-level records have only 31.
+        if detected_field_count is None and len(flds) > 32:
+            detected_field_count = len(flds)
+            if detected_field_count != V33_FIELD_COUNT:
+                fname = os.path.basename(filepath)
+                print(f"  ! {fname} has {detected_field_count} fields "
+                      f"(V3.3 expects {V33_FIELD_COUNT}); "
+                      f"this may be V3.1 or V3.2 layout — fields after index "
+                      f"{min(detected_field_count, V33_FIELD_COUNT) - 1} may be incorrect.")
         pt = flds[P['pool_type']].strip()
         def g(idx): return flds[idx].strip() if len(flds) > idx else ''
         rec = {
