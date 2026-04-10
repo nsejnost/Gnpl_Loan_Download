@@ -24,7 +24,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "bash run.sh --email nsejnost@gmail.com --answer Red --months 60"
+args = "bash run.sh --email nsejnost@gmail.com --answer Red --months 120"
 
 [workflows.workflow.metadata]
 outputType = "console"
