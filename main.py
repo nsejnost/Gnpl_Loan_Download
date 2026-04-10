@@ -370,16 +370,38 @@ def _get_candidates_for_period(period):
 
 
 def get_file_list(months=6):
+    """Return one {period, candidates} entry per calendar month, ending
+    with the most recent *complete* month (the previous calendar month).
+
+    Uses explicit year/month arithmetic rather than `timedelta(days=30)`
+    so that a 120-month window yields exactly 120 distinct YYYYMM
+    periods. The old 30-day stepping drifted ~0.44 days per iteration
+    and, over long windows, would silently collide on some periods
+    while skipping others.
+    """
     now = datetime.now()
+    y, m = now.year, now.month
     files = []
-    for i in range(months + 2):
-        dt = now - timedelta(days=30 * (i + 1))
-        period = dt.strftime("%Y%m")
+    seen = set()
+    for _ in range(months):
+        # Step back one calendar month. Skip the current month since
+        # GNMA has not yet published data for it.
+        m -= 1
+        if m == 0:
+            y -= 1
+            m = 12
+        period = f"{y:04d}{m:02d}"
+        if period in seen:
+            # Defensive: with calendar stepping, collisions are
+            # structurally impossible, but keep the guard so a future
+            # refactor can't silently reintroduce the drift bug.
+            continue
+        seen.add(period)
         files.append({
             "period": period,
             "candidates": _get_candidates_for_period(period),
         })
-    return files[:months]
+    return files
 
 
 def _validate_mfplmon_zip(filepath):
@@ -619,6 +641,71 @@ V31V32_FIELD_COUNT = 73
 V30_FIELD_COUNT    = 72
 V20_FIELD_COUNT    = 71
 V10_FIELD_COUNT    = 69
+
+# ─── File-level deduplication (one file per period) ────────────
+# GNMA published the same period under different filename prefixes
+# across eras. If a user accumulates files from multiple runs, the
+# same period can end up represented by two different cached files
+# (e.g. mfplmon_202106.zip AND mfplmon2_202106.zip, or a .txt and a
+# .zip). The parse loop dedupes to one file per period using the
+# era-correct prefix below as the tiebreaker. Out-of-era files are
+# only used if no in-era file exists for that period.
+ERA_PREFERENCE = [
+    # (lowest_period, highest_period_inclusive, ordered prefixes by preference)
+    (202201, 999912, ["mfplmon3"]),
+    (202107, 202112, ["mfplmon2"]),
+    (201812, 202106, ["mfplmon"]),
+]
+
+_PERIOD_FILENAME_RE = re.compile(
+    r'^(mfplmon3|mfplmon2|mfplmon)_(\d{6})\.(zip|txt)$'
+)
+
+
+def _prefix_priority_for_period(period):
+    """Return the ordered list of filename prefixes preferred for
+    `period` (a YYYYMM string). Prefixes not in the list are treated
+    as lowest-priority fallbacks — only chosen if no preferred file
+    exists for that period."""
+    p = int(period)
+    for lo, hi, prefs in ERA_PREFERENCE:
+        if lo <= p <= hi:
+            return prefs
+    return []
+
+
+def _dedupe_files_by_period(filepaths):
+    """Collapse a list of filepaths to one file per period.
+
+    Preference order, per period:
+      1. Era-correct prefix (mfplmon3 / mfplmon2 / mfplmon by YYYYMM)
+      2. Any other known prefix
+      3. .zip over .txt (smaller + faster to parse)
+
+    Files whose basename doesn't match the known mfplmon*_YYYYMM.{zip,txt}
+    pattern are ignored entirely, so stray files in the data dir (e.g.
+    notes_202401.txt, README.md) can't be misinterpreted as period
+    files.
+
+    Returns a dict {period: filepath}.
+    """
+    # period -> (rank, filepath); lower rank = more preferred
+    by_period = {}
+    for fp in filepaths:
+        m = _PERIOD_FILENAME_RE.match(os.path.basename(fp))
+        if not m:
+            continue
+        prefix, period, ext = m.group(1), m.group(2), m.group(3)
+        prefs = _prefix_priority_for_period(period)
+        prefix_rank = prefs.index(prefix) if prefix in prefs else 99
+        # Tie-break on extension: prefer .zip
+        ext_rank = 0 if ext == 'zip' else 1
+        rank = prefix_rank * 10 + ext_rank
+        prev = by_period.get(period)
+        if prev is None or rank < prev[0]:
+            by_period[period] = (rank, fp)
+    return {per: fp for per, (_, fp) in by_period.items()}
+
 
 def read_mfplmon3(filepath):
     """Parse a GNMA multifamily pool/loan file.
@@ -973,6 +1060,18 @@ def build_analytics(monthly_data):
 
     df = pd.DataFrame(all_records)
 
+    # Defensive row-level dedup. The parse-time `_dedupe_files_by_period`
+    # already guarantees one source file per period, so duplicates here
+    # would only come from a single source file listing the same
+    # (pool_cusip, case_number) twice — rare but possible as a GNMA
+    # data-quality issue. Drop such duplicates keeping the first row,
+    # and log if any were removed so we notice if it becomes common.
+    before = len(df)
+    df = df.drop_duplicates(subset=['period', 'loan_id'], keep='first')
+    dropped = before - len(df)
+    if dropped:
+        print(f"  ! dropped {dropped} duplicate (period, loan_id) row(s)")
+
     # Summary stats
     eligible = df[df['prepay_eligible'] == 1]
     vol = eligible['prepaid_voluntary'].sum()
@@ -1054,12 +1153,19 @@ def main():
     if not allf:
         print(f"No files in {DATA_DIR}"); return
 
-    print(f"\n[parse] Parsing {len(allf)} files...")
+    # Collapse to one file per period, preferring the era-correct
+    # prefix. This also drops any stray files in DATA_DIR whose names
+    # don't match the expected mfplmon*_YYYYMM.{zip,txt} pattern.
+    file_by_period = _dedupe_files_by_period(allf)
+    skipped = len(allf) - len(file_by_period)
+    if skipped:
+        print(f"[parse] collapsed {len(allf)} files to "
+              f"{len(file_by_period)} (one per period; "
+              f"{skipped} duplicate/unrecognized file(s) skipped)")
+
+    print(f"\n[parse] Parsing {len(file_by_period)} files...")
     md = {}
-    for fp in allf:
-        m = re.search(r'(\d{6})', os.path.basename(fp))
-        if not m: continue
-        per = m.group(1)
+    for per, fp in sorted(file_by_period.items()):
         recs = read_mfplmon3(fp)
         if recs:
             md[per] = recs
