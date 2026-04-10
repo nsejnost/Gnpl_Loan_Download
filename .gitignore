@@ -1,3 +1,5 @@
 gnma_mf_data/
 *.xlsx
 *.png
+__pycache__/
+*.pyc
