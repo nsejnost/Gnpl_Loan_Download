@@ -47,6 +47,10 @@ POOL_TYPE_NAMES = {
     'LS': 'Small PL', 'RX': 'Mark-to-Market',
     'CL': 'Construction (Same)', 'CS': 'Construction (Diff)',
 }
+# V3.3 pool-level field indices (Jun 2023 - Present). Pool section has
+# 31 fields (indices 0-30). V3.1/V3.2 (May 2022 - May 2023) have only
+# 29 pool fields (0-28) — no P30/P31. All P1-P29 positions are identical
+# across V3.1, V3.2, and V3.3.
 P = {
     'cusip': 0, 'pool_number': 1, 'pool_indicator': 2, 'pool_type': 3,
     'security_rate': 4, 'issue_date': 5, 'maturity_date': 6, 'orig_agg_amount': 7,
@@ -56,8 +60,14 @@ P = {
     'num_60dq': 21, 'upb_60dq': 22, 'pct_60dq': 23,
     'num_90dq': 24, 'upb_90dq': 25, 'pct_90dq': 26,
     'security_rpb': 27, 'rpb_factor': 28,
-    'proj_loan_sec_rate': 29, 'est_mtg_amount': 30,
+    # V3.3-only fields below — only populated for CL/CS (construction) pool
+    # types. Do NOT read these without first checking the detected layout
+    # version; V3.1/V3.2 files do not have them at all.
+    'proj_loan_sec_rate': 29,  # P30, V3.3-only, CS pool types only
+    'est_mtg_amount': 30,      # P31, V3.3-only, CL/CS pool types only
 }
+
+# V3.3 loan-level field indices (pool fields 0-30 precede).
 L = {
     'disclosure_seq': 31, 'case_number': 32, 'agency_type': 33, 'loan_type': 34,
     'loan_term': 35, 'first_pay_date': 36, 'loan_maturity_date': 37, 'loan_rate': 38,
@@ -77,6 +87,12 @@ L = {
     'fha_program_code': 70, 'insurance_type': 71,
     'as_of_date': 72, 'green_status': 73, 'affordable_status': 74,
 }
+
+# V3.1 / V3.2 loan-level field indices (May 2022 - May 2023). Identical
+# loan fields L1-L44, but pool section has only 29 fields (no P30/P31),
+# so every loan index is shifted down by 2. Derived from L so the two
+# stay in lockstep if V3.3's dict is ever edited.
+L_V31V32 = {k: v - 2 for k, v in L.items()}
 
 GNMA_EMAIL_SELECTOR = 'input[name*="tbemailaddress" i]'
 GNMA_ANSWER_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_tbAnswer'
@@ -424,10 +440,11 @@ def si(s):
     try: return int(float(s.strip())) if s and s.strip() else 0
     except: return 0
 
-# Expected number of fields in the V3.3 layout (indices 0..74).
-# V3.1 (May 2022 - Feb 2023) and V3.2 (Mar 2023 - May 2023) may have
-# different field counts; the parser detects this at runtime.
+# Expected total field count for each supported layout version.
+# V3.3 (Jun 2023+): 31 pool + 44 loan = 75 fields
+# V3.1 / V3.2 (May 2022 - May 2023): 29 pool + 44 loan = 73 fields
 V33_FIELD_COUNT = 75
+V31V32_FIELD_COUNT = 73
 
 def read_mfplmon3(filepath):
     text = None
@@ -448,9 +465,12 @@ def read_mfplmon3(filepath):
             text = f.read()
     if not text: return []
 
-    # Detect field count of the first loan-level record so we can warn the
-    # user if the layout doesn't match V3.3 (loans before Jun 2023).
+    # Detect layout version by counting fields in the first loan-level
+    # record. Pool-only records have fewer fields, so we specifically
+    # look for records with loan data attached.
     detected_field_count = None
+    layout = None   # 'V33', 'V31V32', or None (unknown)
+    LX = L          # loan-level dict to use; defaults to V3.3
 
     records = []
     for line in text.split('\n'):
@@ -458,16 +478,26 @@ def read_mfplmon3(filepath):
         if len(flds) < 32: continue
         cusip = flds[0].strip()
         if not cusip or len(cusip) != 9 or not cusip[0].isdigit(): continue
-        # Capture field count from the first loan-level record (which has
-        # the maximum number of fields). Pool-level records have only 31.
+
+        # First loan-level record: determine layout version
         if detected_field_count is None and len(flds) > 32:
             detected_field_count = len(flds)
-            if detected_field_count != V33_FIELD_COUNT:
-                fname = os.path.basename(filepath)
-                print(f"  ! {fname} has {detected_field_count} fields "
-                      f"(V3.3 expects {V33_FIELD_COUNT}); "
-                      f"this may be V3.1 or V3.2 layout — fields after index "
-                      f"{min(detected_field_count, V33_FIELD_COUNT) - 1} may be incorrect.")
+            fname = os.path.basename(filepath)
+            if detected_field_count == V33_FIELD_COUNT:
+                layout = 'V33'
+                LX = L
+            elif detected_field_count == V31V32_FIELD_COUNT:
+                layout = 'V31V32'
+                LX = L_V31V32
+                print(f"  i {fname}: V3.1/V3.2 layout detected "
+                      f"({detected_field_count} fields)")
+            else:
+                layout = None
+                print(f"  ! {fname}: unrecognized layout "
+                      f"({detected_field_count} fields, expected "
+                      f"{V33_FIELD_COUNT} or {V31V32_FIELD_COUNT}); "
+                      f"loan-level parsing will be skipped")
+
         pt = flds[P['pool_type']].strip()
         def g(idx): return flds[idx].strip() if len(flds) > idx else ''
         rec = {
@@ -480,43 +510,52 @@ def read_mfplmon3(filepath):
             'pool_upb': sf(g(P['pool_upb'])),
             'security_rpb': sf(g(P['security_rpb'])),
             'rpb_factor': sf(g(P['rpb_factor'])),
+            # V3.3-only pool fields. Blank/NaN for V3.1/V3.2 files since
+            # those layouts don't have P30/P31 at all.
+            'proj_loan_sec_rate': sf(g(P['proj_loan_sec_rate'])) if layout == 'V33' else np.nan,
+            'est_mtg_amount': sf(g(P['est_mtg_amount'])) if layout == 'V33' else np.nan,
         }
-        if len(flds) > L['case_number']:
-            case = g(L['case_number'])
+        if layout is not None and len(flds) > LX['case_number']:
+            case = g(LX['case_number'])
+            # V3.1 used "NAF" for Affordable Status; V3.2 renamed this to
+            # "MKT". Normalize at parse time so downstream code only has
+            # to handle the modern value.
+            aff_status_raw = g(LX['affordable_status'])
+            aff_status = 'MKT' if aff_status_raw == 'NAF' else aff_status_raw
             rec.update({
                 'case_number': case, 'loan_id': cusip + '_' + case,
-                'agency_type': g(L['agency_type']), 'loan_type': g(L['loan_type']),
-                'loan_term': si(g(L['loan_term'])),
-                'first_pay_date': g(L['first_pay_date']),
-                'loan_maturity_date': g(L['loan_maturity_date']),
-                'loan_rate': sf(g(L['loan_rate'])),
-                'modified_ind': g(L['modified_ind']),
-                'non_level_ind': g(L['non_level_ind']),
-                'mature_loan_flag': g(L['mature_loan_flag']),
-                'origination_date': g(L['origination_date']),
-                'lockout_term_yrs': si(g(L['lockout_term'])),
-                'lockout_end_date': g(L['lockout_end_date']),
-                'prepay_premium_period_yrs': si(g(L['prepay_premium_period'])),
-                'prepay_end_date': g(L['prepay_end_date']),
-                'prepay_penalty_flag': g(L['prepay_penalty_flag']),
-                'orig_prin_bal': sf(g(L['orig_prin_bal'])),
-                'upb_at_issuance': sf(g(L['upb_at_issuance'])),
-                'upb': sf(g(L['upb'])),
-                'months_dq': si(g(L['months_dq'])),
-                'liquidation_flag': g(L['liquidation_flag']),
-                'removal_reason': g(L['removal_reason']),
-                'property_name': g(L['property_name']),
-                'property_city': g(L['property_city']),
-                'property_state': g(L['property_state']),
-                'msa': g(L['msa']),
-                'num_units': si(g(L['num_units'])),
-                'pi_amount': sf(g(L['pi_amount'])),
-                'prepay_desc': g(L['prepay_desc']),
-                'fha_program_code': g(L['fha_program_code']),
-                'insurance_type': g(L['insurance_type']),
-                'as_of_date': g(L['as_of_date']),
-                'green_status': g(L['green_status']),
-                'affordable_status': g(L['affordable_status']),
+                'agency_type': g(LX['agency_type']), 'loan_type': g(LX['loan_type']),
+                'loan_term': si(g(LX['loan_term'])),
+                'first_pay_date': g(LX['first_pay_date']),
+                'loan_maturity_date': g(LX['loan_maturity_date']),
+                'loan_rate': sf(g(LX['loan_rate'])),
+                'modified_ind': g(LX['modified_ind']),
+                'non_level_ind': g(LX['non_level_ind']),
+                'mature_loan_flag': g(LX['mature_loan_flag']),
+                'origination_date': g(LX['origination_date']),
+                'lockout_term_yrs': si(g(LX['lockout_term'])),
+                'lockout_end_date': g(LX['lockout_end_date']),
+                'prepay_premium_period_yrs': si(g(LX['prepay_premium_period'])),
+                'prepay_end_date': g(LX['prepay_end_date']),
+                'prepay_penalty_flag': g(LX['prepay_penalty_flag']),
+                'orig_prin_bal': sf(g(LX['orig_prin_bal'])),
+                'upb_at_issuance': sf(g(LX['upb_at_issuance'])),
+                'upb': sf(g(LX['upb'])),
+                'months_dq': si(g(LX['months_dq'])),
+                'liquidation_flag': g(LX['liquidation_flag']),
+                'removal_reason': g(LX['removal_reason']),
+                'property_name': g(LX['property_name']),
+                'property_city': g(LX['property_city']),
+                'property_state': g(LX['property_state']),
+                'msa': g(LX['msa']),
+                'num_units': si(g(LX['num_units'])),
+                'pi_amount': sf(g(LX['pi_amount'])),
+                'prepay_desc': g(LX['prepay_desc']),
+                'fha_program_code': g(LX['fha_program_code']),
+                'insurance_type': g(LX['insurance_type']),
+                'as_of_date': g(LX['as_of_date']),
+                'green_status': g(LX['green_status']),
+                'affordable_status': aff_status,
             })
         else:
             rec.update({'loan_id': cusip + '_POOL', 'case_number': '',
