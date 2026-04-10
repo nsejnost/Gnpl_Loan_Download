@@ -94,6 +94,36 @@ L = {
 # stay in lockstep if V3.3's dict is ever edited.
 L_V31V32 = {k: v - 2 for k, v in L.items()}
 
+# ─── Historical layouts (V3.0, V2.0, V1.0) ────────────────
+# Every historical GNMA multifamily layout is derivable from the V3.3
+# dicts above because each later version only *appended* fields at the
+# tail of its section (pool or loan). See Historical_Layouts_Guide_Feb2024.pdf
+# for the definitive version history.
+#
+# V3.0 (Jan 2022 - Apr 2022, mfplmon3): V3.1/V3.2 minus the
+# Affordable Status loan field (which was added in V3.1 as a new
+# trailing loan field). Pool section is identical to V3.1/V3.2.
+L_V30 = {k: v for k, v in L_V31V32.items() if k != 'affordable_status'}
+
+# V2.0 (Jul 2021 - Dec 2021, mfplmon2): V3.0 minus Green Status
+# (added in V3.0 as a new trailing loan field). Pool section is
+# identical to V3.0 (29 fields).
+L_V20 = {k: v for k, v in L_V30.items() if k != 'green_status'}
+
+# V1.0 (Dec 2018 - Jun 2021, mfplmon): V2.0 but the pool section also
+# loses Security RPB (P28) and RPB Factor (P29), which were added in
+# V2.0. Since those were the last two pool fields, every loan index
+# shifts down by a further 2.
+L_V10 = {k: v - 2 for k, v in L_V20.items()}
+
+# Pool-level dict for V1.0 only. V2.0/V3.0/V3.1/V3.2 pool sections are
+# all identical to P's first 29 fields (indices 0-28), so P itself
+# serves them as long as proj_loan_sec_rate / est_mtg_amount reads are
+# gated on layout == 'V33' (already done at the read site below).
+P_V10 = {k: v for k, v in P.items()
+         if k not in ('security_rpb', 'rpb_factor',
+                      'proj_loan_sec_rate', 'est_mtg_amount')}
+
 GNMA_EMAIL_SELECTOR = 'input[name*="tbemailaddress" i]'
 GNMA_ANSWER_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_tbAnswer'
 GNMA_ANSWER_SUBMIT_ID = '#ctl00_ctl45_g_174dfd7c_a193_4313_a2ed_0005c00273fc_ctl00_btnAnswerSecret'
@@ -285,23 +315,69 @@ def authenticate_gnma(email, answer):
         return None
 
 
+def _get_candidates_for_period(period):
+    """Return an ordered list of (filename, url) candidates to try for `period`.
+
+    GNMA publishes multifamily pool/loan data under three historical
+    filename prefixes and two extensions depending on the era:
+
+        mfplmon3_{YYYYMM}.zip   Jan 2022 - present   (V3.0 / V3.1 / V3.2 / V3.3)
+        mfplmon2_{YYYYMM}.zip   Jul 2021 - Dec 2021  (V2.0)
+        mfplmon_{YYYYMM}.txt    Dec 2018 - Jun 2021  (V1.0, plain text)
+
+    Recent files live under `data_bulk/` (forward slash); everything
+    older is moved to `data_history_cons` (URL-encoded backslash
+    `%5C`). Older mfplmon2/mfplmon files may also appear as `.zip` or
+    `.txt` on the server, so we generate a candidate per plausible
+    extension and let the downloader try them in priority order.
+
+    The era cutoffs come from `Historical_Layouts_Guide_Feb2024.pdf`
+    (in the repo root). Do not reorder the candidates without updating
+    this comment: the order matters for the slow, HTTP-hitting fallback
+    loop in `download_files`.
+    """
+    yyyymm = int(period)
+    candidates = []
+
+    def add(prefix, directory, ext):
+        fn = f"{prefix}_{period}{ext}"
+        if directory == "data_bulk/":
+            dlfile = f"{directory}{fn}"
+        else:
+            dlfile = f"{directory}%5C{fn}"
+        url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile={dlfile}"
+        candidates.append((fn, url))
+
+    if yyyymm >= 202201:
+        # mfplmon3 era (V3.0 / V3.1 / V3.2 / V3.3). data_bulk only
+        # holds the most recent months; everything older has been
+        # moved into data_history_cons.
+        add("mfplmon3", "data_bulk/",        ".zip")
+        add("mfplmon3", "data_history_cons", ".zip")
+        add("mfplmon3", "data_history_cons", ".txt")
+    elif yyyymm >= 202107:
+        # mfplmon2 era (V2.0). Jul 2021 - Dec 2021.
+        add("mfplmon2", "data_history_cons", ".zip")
+        add("mfplmon2", "data_history_cons", ".txt")
+    else:
+        # mfplmon era (V1.0). Dec 2018 - Jun 2021. The V1.0 disclosure
+        # history states files are published as plain text; a .zip
+        # fallback is kept in case some months were re-uploaded.
+        add("mfplmon",  "data_history_cons", ".txt")
+        add("mfplmon",  "data_history_cons", ".zip")
+
+    return candidates
+
+
 def get_file_list(months=6):
     now = datetime.now()
     files = []
     for i in range(months + 2):
         dt = now - timedelta(days=30 * (i + 1))
         period = dt.strftime("%Y%m")
-        fn = f"mfplmon3_{period}.zip"
-        # Recent files live under data_bulk/; older files are moved to
-        # data_history_cons/. The downloader will try data_bulk first and
-        # fall back to data_history_cons (URL-encoded backslash) on failure.
-        primary_url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile=data_bulk/{fn}"
-        fallback_url = f"{BULK_URL}/protectedfiledownload.aspx?dlfile=data_history_cons%5C{fn}"
         files.append({
             "period": period,
-            "filename": fn,
-            "url": primary_url,
-            "fallback_url": fallback_url,
+            "candidates": _get_candidates_for_period(period),
         })
     return files[:months]
 
@@ -352,6 +428,50 @@ def _validate_mfplmon_zip(filepath):
         return False, f"validation error: {e}"
 
 
+def _validate_mfplmon_txt(filepath):
+    """Verify a .txt file is a real mfplmon plain-text file.
+
+    GNMA's server returns ~4 KB HTML error pages for missing files;
+    real V1.0/V2.0 text files are pipe-delimited with many fields per
+    line.
+    """
+    try:
+        size = os.path.getsize(filepath)
+        with open(filepath, 'r', errors='replace') as f:
+            head = f.read(2000)
+        low = head.lower()
+        if '<html' in low or '<!doctype' in low:
+            return False, "HTML error page (file not on server)"
+        if size < 1000:
+            return False, f"file too small ({size} bytes)"
+        first_line = head.split('\n', 1)[0]
+        if first_line.count('|') < 20:
+            return False, f"not pipe-delimited (first line: {first_line[:80]})"
+        return True, "ok"
+    except Exception as e:
+        return False, f"validation error: {e}"
+
+
+def _validate_mfplmon_file(filepath):
+    """Dispatch to the right validator based on extension."""
+    if filepath.endswith('.zip'):
+        return _validate_mfplmon_zip(filepath)
+    if filepath.endswith('.txt'):
+        return _validate_mfplmon_txt(filepath)
+    return False, f"unknown extension: {filepath}"
+
+
+def _find_cached_file(data_dir, period):
+    """Return the first existing file for `period` across any supported
+    prefix/extension, or None if no cached file exists."""
+    for prefix in ("mfplmon3", "mfplmon2", "mfplmon"):
+        for ext in (".zip", ".txt"):
+            p = os.path.join(data_dir, f"{prefix}_{period}{ext}")
+            if os.path.exists(p) and os.path.getsize(p) > 1000:
+                return p
+    return None
+
+
 def _ensure_data_dir(path):
     """Ensure `path` exists and is a directory.
 
@@ -391,7 +511,8 @@ def _ensure_data_dir(path):
 def _attempt_download(session, url, dest, label):
     """Try a single download URL. Returns (success, reason).
 
-    On success, the file is saved to `dest` and validated as a real mfplmon zip.
+    On success, the file is saved to `dest` and validated as a real
+    mfplmon file (extension-aware: zip or txt).
     On failure, any partial file at `dest` is removed.
     """
     try:
@@ -411,7 +532,7 @@ def _attempt_download(session, url, dest, label):
                 if total:
                     print(f"\r  > {label} {dl//1024}/{total//1024} KB ({dl*100//total}%)",
                           end="", flush=True)
-        ok, reason = _validate_mfplmon_zip(dest)
+        ok, reason = _validate_mfplmon_file(dest)
         if not ok:
             os.remove(dest)
             return False, reason
@@ -429,32 +550,43 @@ def download_files(session, months=6):
     print(f"\n[download] Downloading {len(files)} files to {DATA_DIR}\n")
     downloaded = 0
     missing_periods = []
+
     for f in files:
-        dest = os.path.join(DATA_DIR, f["filename"])
-        if os.path.exists(dest) and os.path.getsize(dest) > 1000:
-            # Re-validate cached files so old bad downloads are caught
-            ok, reason = _validate_mfplmon_zip(dest)
+        period = f["period"]
+
+        # Cache lookup: the file for this period could be present
+        # under any of the 3 prefixes × 2 extensions, since a user may
+        # have pulled files across multiple historical eras.
+        cached = _find_cached_file(DATA_DIR, period)
+        if cached:
+            ok, reason = _validate_mfplmon_file(cached)
             if ok:
-                print(f"  ok {f['filename']} (cached, {os.path.getsize(dest)//1024} KB)")
-                downloaded += 1; continue
-            else:
-                print(f"  ! {f['filename']} cached but invalid ({reason}); re-downloading")
-                os.remove(dest)
+                print(f"  ok {os.path.basename(cached)} (cached, "
+                      f"{os.path.getsize(cached)//1024} KB)")
+                downloaded += 1
+                continue
+            print(f"  ! {os.path.basename(cached)} cached but invalid "
+                  f"({reason}); re-downloading")
+            os.remove(cached)
 
-        # Try data_bulk first (recent months)
-        ok, reason = _attempt_download(session, f["url"], dest, f["filename"])
-        if not ok:
-            # Fall back to data_history_cons (older months)
-            print(f"\r  > {f['filename']} not in data_bulk ({reason}); trying data_history_cons..." + " "*20)
-            ok, reason = _attempt_download(session, f["fallback_url"], dest, f["filename"])
+        # Try each candidate URL in priority order until one works.
+        success = False
+        last_reason = None
+        for fn, url in f["candidates"]:
+            dest = os.path.join(DATA_DIR, fn)
+            ok, reason = _attempt_download(session, url, dest, fn)
+            if ok:
+                print(f"\r  ok {fn} — {os.path.getsize(dest)//1024} KB"
+                      + " " * 40)
+                downloaded += 1
+                success = True
+                break
+            last_reason = reason
 
-        if ok:
-            sz = os.path.getsize(dest)
-            print(f"\r  ok {f['filename']} — {sz//1024} KB" + " "*40)
-            downloaded += 1
-        else:
-            print(f"\r  x {f['filename']} — {reason}" + " "*40)
-            missing_periods.append(f["period"])
+        if not success:
+            print(f"\r  x {period} — no candidate worked "
+                  f"(last: {last_reason})" + " " * 20)
+            missing_periods.append(period)
         time.sleep(1)
 
     print(f"\n[download] {downloaded}/{len(files)} files downloaded")
@@ -477,12 +609,28 @@ def si(s):
     except: return 0
 
 # Expected total field count for each supported layout version.
-# V3.3 (Jun 2023+): 31 pool + 44 loan = 75 fields
-# V3.1 / V3.2 (May 2022 - May 2023): 29 pool + 44 loan = 73 fields
-V33_FIELD_COUNT = 75
+# V3.3 (Jun 2023+):                31 pool + 44 loan = 75 fields
+# V3.1 / V3.2 (May 2022-May 2023): 29 pool + 44 loan = 73 fields
+# V3.0 (Jan 2022 - Apr 2022):      29 pool + 43 loan = 72 fields
+# V2.0 (Jul 2021 - Dec 2021):      29 pool + 42 loan = 71 fields
+# V1.0 (Dec 2018 - Jun 2021):      27 pool + 42 loan = 69 fields
+V33_FIELD_COUNT    = 75
 V31V32_FIELD_COUNT = 73
+V30_FIELD_COUNT    = 72
+V20_FIELD_COUNT    = 71
+V10_FIELD_COUNT    = 69
 
 def read_mfplmon3(filepath):
+    """Parse a GNMA multifamily pool/loan file.
+
+    Handles every historical layout from V1.0 (Dec 2018) through V3.3
+    (Jun 2023+). Layout is detected by counting fields in the first
+    loan-level record; missing fields for older layouts (e.g.
+    green_status on V2.0/V1.0, affordable_status on V3.0/V2.0/V1.0,
+    security_rpb/rpb_factor on V1.0) are emitted as empty/NaN.
+
+    Accepts both `.zip` (V2.0+) and `.txt` (V1.0 and some V2.0) inputs.
+    """
     text = None
     if filepath.endswith('.zip'):
         try:
@@ -505,8 +653,9 @@ def read_mfplmon3(filepath):
     # record. Pool-only records have fewer fields, so we specifically
     # look for records with loan data attached.
     detected_field_count = None
-    layout = None   # 'V33', 'V31V32', or None (unknown)
+    layout = None   # 'V33' | 'V31V32' | 'V30' | 'V20' | 'V10' | None
     LX = L          # loan-level dict to use; defaults to V3.3
+    PX = P          # pool-level dict to use; defaults to V3.3
 
     records = []
     for line in text.split('\n'):
@@ -520,77 +669,106 @@ def read_mfplmon3(filepath):
             detected_field_count = len(flds)
             fname = os.path.basename(filepath)
             if detected_field_count == V33_FIELD_COUNT:
-                layout = 'V33'
-                LX = L
+                layout, LX, PX = 'V33', L, P
             elif detected_field_count == V31V32_FIELD_COUNT:
-                layout = 'V31V32'
-                LX = L_V31V32
+                layout, LX, PX = 'V31V32', L_V31V32, P
                 print(f"  i {fname}: V3.1/V3.2 layout detected "
                       f"({detected_field_count} fields)")
+            elif detected_field_count == V30_FIELD_COUNT:
+                layout, LX, PX = 'V30', L_V30, P
+                print(f"  i {fname}: V3.0 layout detected "
+                      f"({detected_field_count} fields)")
+            elif detected_field_count == V20_FIELD_COUNT:
+                layout, LX, PX = 'V20', L_V20, P
+                print(f"  i {fname}: V2.0 layout detected "
+                      f"({detected_field_count} fields)")
+            elif detected_field_count == V10_FIELD_COUNT:
+                layout, LX, PX = 'V10', L_V10, P_V10
+                print(f"  i {fname}: V1.0 layout detected "
+                      f"({detected_field_count} fields)")
             else:
-                layout = None
+                layout, LX, PX = None, L, P
                 print(f"  ! {fname}: unrecognized layout "
                       f"({detected_field_count} fields, expected "
-                      f"{V33_FIELD_COUNT} or {V31V32_FIELD_COUNT}); "
-                      f"loan-level parsing will be skipped")
+                      f"{V33_FIELD_COUNT}/{V31V32_FIELD_COUNT}/"
+                      f"{V30_FIELD_COUNT}/{V20_FIELD_COUNT}/"
+                      f"{V10_FIELD_COUNT}); loan-level parsing will "
+                      f"be skipped")
 
-        pt = flds[P['pool_type']].strip()
+        pt = flds[PX['pool_type']].strip()
         def g(idx): return flds[idx].strip() if len(flds) > idx else ''
+        def gL(key, default=''):
+            """Loan-level field lookup that tolerates missing keys.
+
+            Older layouts drop trailing fields entirely (e.g. V2.0 has
+            no green_status, V3.0/V2.0/V1.0 have no affordable_status),
+            so a plain LX[key] would KeyError. Return `default` when
+            the key is absent or the line is truncated.
+            """
+            idx = LX.get(key)
+            if idx is None or len(flds) <= idx:
+                return default
+            return flds[idx].strip()
+
         rec = {
-            'pool_cusip': cusip, 'pool_number': g(P['pool_number']),
+            'pool_cusip': cusip, 'pool_number': g(PX['pool_number']),
             'pool_type': pt, 'pool_type_name': POOL_TYPE_NAMES.get(pt, pt),
-            'security_rate': sf(g(P['security_rate'])),
-            'issue_date': g(P['issue_date']), 'pool_maturity_date': g(P['maturity_date']),
-            'orig_agg_amount': sf(g(P['orig_agg_amount'])),
-            'issuer_number': g(P['issuer_number']), 'issuer_name': g(P['issuer_name']),
-            'pool_upb': sf(g(P['pool_upb'])),
-            'security_rpb': sf(g(P['security_rpb'])),
-            'rpb_factor': sf(g(P['rpb_factor'])),
-            # V3.3-only pool fields. Blank/NaN for V3.1/V3.2 files since
-            # those layouts don't have P30/P31 at all.
+            'security_rate': sf(g(PX['security_rate'])),
+            'issue_date': g(PX['issue_date']), 'pool_maturity_date': g(PX['maturity_date']),
+            'orig_agg_amount': sf(g(PX['orig_agg_amount'])),
+            'issuer_number': g(PX['issuer_number']), 'issuer_name': g(PX['issuer_name']),
+            'pool_upb': sf(g(PX['pool_upb'])),
+            # Security RPB / RPB Factor were added in V2.0. V1.0 files
+            # don't have them at all, so PX_V10 drops those keys.
+            'security_rpb': sf(g(PX['security_rpb'])) if 'security_rpb' in PX else np.nan,
+            'rpb_factor':   sf(g(PX['rpb_factor']))   if 'rpb_factor'   in PX else np.nan,
+            # V3.3-only pool fields (CL/CS only). NaN on every older
+            # layout since P30/P31 don't exist before V3.3.
             'proj_loan_sec_rate': sf(g(P['proj_loan_sec_rate'])) if layout == 'V33' else np.nan,
-            'est_mtg_amount': sf(g(P['est_mtg_amount'])) if layout == 'V33' else np.nan,
+            'est_mtg_amount':     sf(g(P['est_mtg_amount']))     if layout == 'V33' else np.nan,
         }
         if layout is not None and len(flds) > LX['case_number']:
-            case = g(LX['case_number'])
-            # V3.1 used "NAF" for Affordable Status; V3.2 renamed this to
-            # "MKT". Normalize at parse time so downstream code only has
-            # to handle the modern value.
-            aff_status_raw = g(LX['affordable_status'])
+            case = gL('case_number')
+            # V3.1 used "NAF" for Affordable Status; V3.2 renamed this
+            # to "MKT". Normalize at parse time so downstream code only
+            # has to handle the modern value. For V3.0/V2.0/V1.0 the
+            # field doesn't exist, gL returns '', and normalization is
+            # a no-op.
+            aff_status_raw = gL('affordable_status')
             aff_status = 'MKT' if aff_status_raw == 'NAF' else aff_status_raw
             rec.update({
                 'case_number': case, 'loan_id': cusip + '_' + case,
-                'agency_type': g(LX['agency_type']), 'loan_type': g(LX['loan_type']),
-                'loan_term': si(g(LX['loan_term'])),
-                'first_pay_date': g(LX['first_pay_date']),
-                'loan_maturity_date': g(LX['loan_maturity_date']),
-                'loan_rate': sf(g(LX['loan_rate'])),
-                'modified_ind': g(LX['modified_ind']),
-                'non_level_ind': g(LX['non_level_ind']),
-                'mature_loan_flag': g(LX['mature_loan_flag']),
-                'origination_date': g(LX['origination_date']),
-                'lockout_term_yrs': si(g(LX['lockout_term'])),
-                'lockout_end_date': g(LX['lockout_end_date']),
-                'prepay_premium_period_yrs': si(g(LX['prepay_premium_period'])),
-                'prepay_end_date': g(LX['prepay_end_date']),
-                'prepay_penalty_flag': g(LX['prepay_penalty_flag']),
-                'orig_prin_bal': sf(g(LX['orig_prin_bal'])),
-                'upb_at_issuance': sf(g(LX['upb_at_issuance'])),
-                'upb': sf(g(LX['upb'])),
-                'months_dq': si(g(LX['months_dq'])),
-                'liquidation_flag': g(LX['liquidation_flag']),
-                'removal_reason': g(LX['removal_reason']),
-                'property_name': g(LX['property_name']),
-                'property_city': g(LX['property_city']),
-                'property_state': g(LX['property_state']),
-                'msa': g(LX['msa']),
-                'num_units': si(g(LX['num_units'])),
-                'pi_amount': sf(g(LX['pi_amount'])),
-                'prepay_desc': g(LX['prepay_desc']),
-                'fha_program_code': g(LX['fha_program_code']),
-                'insurance_type': g(LX['insurance_type']),
-                'as_of_date': g(LX['as_of_date']),
-                'green_status': g(LX['green_status']),
+                'agency_type': gL('agency_type'), 'loan_type': gL('loan_type'),
+                'loan_term': si(gL('loan_term')),
+                'first_pay_date': gL('first_pay_date'),
+                'loan_maturity_date': gL('loan_maturity_date'),
+                'loan_rate': sf(gL('loan_rate')),
+                'modified_ind': gL('modified_ind'),
+                'non_level_ind': gL('non_level_ind'),
+                'mature_loan_flag': gL('mature_loan_flag'),
+                'origination_date': gL('origination_date'),
+                'lockout_term_yrs': si(gL('lockout_term')),
+                'lockout_end_date': gL('lockout_end_date'),
+                'prepay_premium_period_yrs': si(gL('prepay_premium_period')),
+                'prepay_end_date': gL('prepay_end_date'),
+                'prepay_penalty_flag': gL('prepay_penalty_flag'),
+                'orig_prin_bal': sf(gL('orig_prin_bal')),
+                'upb_at_issuance': sf(gL('upb_at_issuance')),
+                'upb': sf(gL('upb')),
+                'months_dq': si(gL('months_dq')),
+                'liquidation_flag': gL('liquidation_flag'),
+                'removal_reason': gL('removal_reason'),
+                'property_name': gL('property_name'),
+                'property_city': gL('property_city'),
+                'property_state': gL('property_state'),
+                'msa': gL('msa'),
+                'num_units': si(gL('num_units')),
+                'pi_amount': sf(gL('pi_amount')),
+                'prepay_desc': gL('prepay_desc'),
+                'fha_program_code': gL('fha_program_code'),
+                'insurance_type': gL('insurance_type'),
+                'as_of_date': gL('as_of_date'),
+                'green_status': gL('green_status'),
                 'affordable_status': aff_status,
             })
         else:
