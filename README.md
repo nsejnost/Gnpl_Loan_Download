@@ -1,13 +1,18 @@
 # GNMA Multifamily Loan Data Downloader & Prepayment Analyzer
 
-Automated tool that authenticates with Ginnie Mae's gated Disclosure Data Download site, bulk-downloads monthly multifamily loan-level portfolio files (`mfplmon3`), and produces a single enriched CSV with prepayment flags, lockout/penalty status, and refinance incentive calculations — ready for S-curve estimation.
+Automated tool that authenticates with Ginnie Mae's gated Disclosure Data Download site, bulk-downloads monthly multifamily loan-level portfolio files (`mfplmon3`), produces a single enriched CSV with prepayment flags, lockout/penalty status, and refinance incentive calculations, and runs an XGBoost + SHAP machine learning pipeline that estimates prepayment S-curves and attributes prepayment probability to individual loan characteristics.
 
 ## Quick Start
 
 ### On Replit (recommended)
 1. Open the project in Replit
-2. Hit the **Run** button — it handles everything automatically
-3. Output: `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` (~15,000 loans x 24 months)
+2. Hit the **Run** button — it handles authentication, download, and parsing automatically
+3. Output: `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` (~15,000 loans × 120 months ≈ 1.8M rows)
+4. Optionally run the ML analysis:
+   ```bash
+   python3 prepayment_analysis.py    # trains XGBoost, computes SHAP, saves analysis_results.json
+   python3 generate_report.py        # builds interactive prepayment_report.html
+   ```
 
 ### On any machine
 ```bash
@@ -32,7 +37,7 @@ python3 main.py --skip-download --data-dir ./my_files
 | `--skip-download` | false | Skip auth/download, parse existing files only |
 | `--data-dir` | `./gnma_mf_data` | Directory for downloaded zip files |
 
-Note: The `.replit` Run button is configured to pass `--months 24` for 2 years of history.
+Note: The `.replit` Run button is configured to pass `--months 120` for the maximum available history (roughly May 2022 onward, when the V3.1 layout was introduced).
 
 ## What This Tool Does
 
@@ -50,26 +55,42 @@ Ginnie Mae publishes monthly loan-level data for all multifamily (project loan) 
 │                                                             │
 │  requests (with session cookies)                            │
 │    → Bulk download mfplmon3_YYYYMM.zip files                │
-│    → Cached locally — skips already-downloaded files         │
+│    → Try data_bulk/ first, fall back to data_history_cons/  │
+│    → Validate each zip as a real mfplmon file               │
+│    → Cached locally — skips already-downloaded files        │
 ├─────────────────────────────────────────────────────────────┤
 │  Phase 2: Parse & Enrich                                    │
 │                                                             │
-│  Parse mfplmon3 V3.3 pipe-delimited format                  │
-│    → 31 pool-level fields + 44 loan-level fields per record │
+│  Parse mfplmon3 V3.1 / V3.2 / V3.3 (detected at runtime)    │
+│    → V3.3: 31 pool + 44 loan = 75 fields per record         │
+│    → V3.1/V3.2: 29 pool + 44 loan = 73 fields per record    │
 │                                                             │
 │  Analytics (build_analytics)                                │
-│    → Lockout & penalty period status per loan-month          │
+│    → Lockout & penalty period status per loan-month         │
 │    → Prepayment flags (lockout + construction excluded)     │
 │    → Refi incentive using GNMA PLC rates                    │
 │    → Declining penalty schedule parsed from prepay_desc     │
 │                                                             │
-│  Output: timestamped gzipped CSV                             │
+│  Output: timestamped gzipped CSV                            │
+├─────────────────────────────────────────────────────────────┤
+│  Phase 3: ML Prepayment Analysis (optional)                 │
+│                                                             │
+│  prepayment_analysis.py                                     │
+│    → Empirical S-curves (refi, penalty, age, UPB, state)    │
+│    → XGBoost binary classifier with time-based split        │
+│    → SHAP TreeExplainer: global + per-loan attribution      │
+│    → Model-implied S-curves from median loan profile        │
+│    → Saves analysis_results.json                            │
+│                                                             │
+│  generate_report.py                                         │
+│    → Self-contained prepayment_report.html with Chart.js    │
+│    → S-curves, feature importance, sample loan waterfalls   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Output CSV: Column Reference
 
-The output file `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` contains one row per loan per month. With 24 months of history and ~15,000 loans/month, expect ~360,000 rows. The file is gzip-compressed (~38 MB) and can be read directly by pandas: `pd.read_csv('gnma_mf_raw_data_*.csv.gz')`.
+The output file `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` contains one row per loan per month. With 120 months of history and ~15,000 loans/month, expect roughly 1.8M rows. The file is gzip-compressed and can be read directly by pandas: `pd.read_csv('gnma_mf_raw_data_*.csv.gz')`.
 
 ### Raw Fields (parsed from mfplmon3)
 
@@ -89,6 +110,8 @@ The output file `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` contains one row per l
 | `pool_upb` | Current pool unpaid principal balance ($) |
 | `security_rpb` | Remaining principal balance of the security ($) |
 | `rpb_factor` | RPB factor (current RPB / original face) |
+| `proj_loan_sec_rate` | Project Loan Security Interest Rate (V3.3-only, populated only for CS pool types) |
+| `est_mtg_amount` | Estimated Mortgage Amount at construction-loan conversion (V3.3-only, populated only for CL/CS pool types) |
 
 **Loan-level fields:**
 | Column | Description |
@@ -143,6 +166,59 @@ The output file `gnma_mf_raw_data_YYYYMMDD_HHMMSS.csv.gz` contains one row per l
 | `prepay_eligible` | 1 if eligible for prepayment analysis (not in lockout, not CL/CS construction) |
 | `prepaid_voluntary` | 1 if the loan voluntarily prepaid this period |
 | `prepaid_involuntary` | 1 if the loan was involuntarily removed this period |
+
+## ML Prepayment Analysis
+
+Once `main.py` has produced a `gnma_mf_raw_data_*.csv.gz`, two additional scripts turn it into a full prepayment model with an interactive report:
+
+```bash
+python3 prepayment_analysis.py    # auto-detects the most recent raw data file
+python3 generate_report.py        # writes prepayment_report.html
+```
+
+### What `prepayment_analysis.py` does
+
+1. **Loads the most recent `gnma_mf_raw_data_*.csv.gz`** (via `glob` + mtime — no hardcoded filename).
+2. **Feature engineering:** loan age, remaining term, log UPB, refi incentive bucket (25 bp bins), age bucket, UPB bucket, penalty points bucket, penalty status (`in_lockout` / `in_prepay_penalty` / `past_all`), top-15 state group, pool type group, green/affordable flags, delinquency flag.
+3. **Empirical S-curves:** CPR by refi incentive, by penalty status × refi incentive, by loan age, by UPB, by penalty points, and by state. Each bucket requires a minimum observation count for statistical reliability.
+4. **XGBoost binary classifier** predicting `prepaid_voluntary` per loan-month:
+   - 500 trees, max depth 4, learning rate 0.03
+   - Moderate class weighting (`scale_pos_weight=3.0`) to keep probabilities calibrated for the rare ~0.26% positive rate
+   - L1/L2 regularization and `min_child_weight=20` to prevent overfitting on the sparse positive class
+   - **Time-based train/test split:** the last 6 monthly periods are held out as an out-of-time test set
+5. **SHAP TreeExplainer:**
+   - Global feature importance via mean |SHAP| across a 3,000-row test sample
+   - Per-loan attribution for 7 sample loans (3 actual prepays, 2 high-risk survivors, 2 low-risk) — decomposes each prediction into additive feature contributions relative to the model baseline
+6. **Model-implied S-curves:** synthetic median-loan profiles varied across the refi-incentive grid (-500 to +675 bps), evaluated separately for "past all restrictions" and "in penalty" profiles.
+
+Results are saved to `analysis_results.json` for the report generator to consume.
+
+### What `generate_report.py` produces
+
+`prepayment_report.html` is a self-contained HTML report (loads Chart.js from CDN, all data embedded inline). Sections:
+
+1. **Dataset Overview** — row counts, baseline SMM/CPR, model AUC
+2. **Empirical Refi Incentive S-Curve** — the classic S-curve shape, with observation counts per bucket
+3. **S-Curves by Penalty Status** — separate curves for loans in lockout, in penalty, and past all restrictions
+4. **Model-Implied S-Curves** — smooth curves from the XGBoost model at the median loan profile
+5. **CPR by Loan Age, UPB, Penalty Points, State** — categorical bar charts
+6. **Feature Importance** — XGBoost gain and mean |SHAP|
+7. **Sample Loan Attribution** — 7 loan cards with SHAP waterfalls showing which features drive each loan's prediction relative to the baseline
+
+### Typical results (with 24 months of training data)
+
+| Metric | Value |
+|--------|-------|
+| Eligible loan-months | ~352,000 |
+| Voluntary prepayment events | ~900 |
+| Baseline SMM (unconditional) | 0.26% |
+| Baseline CPR (annualized) | 3.0% |
+| XGBoost Test AUC (out-of-time) | ~0.72 |
+| XGBoost Test Brier score | ~0.0036 |
+
+**Top SHAP features:** remaining term, log UPB, loan age, refi incentive, num units, security rate, prepay penalty points. (Remaining term and log UPB dominate because near-maturity loans prepay more often and larger loans have more sophisticated borrowers.)
+
+With 120 months of history the dataset is ~5× larger, so expect smoother S-curves and better out-of-time AUC.
 
 ## Refinance Incentive Calculation
 
@@ -203,16 +279,34 @@ For eligible loans:
 | CL | Construction Loan (Same Issuer) | No — converts to PN on completion |
 | CS | Construction Loan (Diff Issuer) | No — converts to PN on completion |
 
-## Source Data: mfplmon3 (V3.3 format)
+## Source Data: mfplmon3 (V3.1 / V3.2 / V3.3)
 
-GNMA publishes monthly `mfplmon3_YYYYMM.zip` files containing pipe-delimited text with one record per loan. Each record has 31 pool-level fields (indices 0-30) followed by 44 loan-level fields (indices 31-74). The full field mapping is defined in the `P` and `L` dictionaries in `main.py`.
+GNMA publishes monthly `mfplmon3_YYYYMM.zip` files containing pipe-delimited text with one record per loan. The file has existed under three layout versions, all of which this project parses with automatic runtime detection by field count.
+
+| Version | Effective | Pool Fields | Loan Fields | Total | Key Differences |
+|---------|-----------|-------------|-------------|-------|-----------------|
+| V3.1 | May 2022 – Feb 2023 | P1–P29 | L1–L44 | 73 | Affordable Status uses `NAF` for "not affordable" |
+| V3.2 | Mar 2023 – May 2023 | P1–P29 | L1–L44 | 73 | Non-format change: `NAF` renamed to `MKT` in L44 |
+| V3.3 | Jun 2023 – Present | P1–P31 | L1–L44 | 75 | Added P30 (Project Loan Security Rate) and P31 (Estimated Mortgage Amount) for CL/CS construction pools |
+
+The parser detects the layout by counting fields in the first loan-level record of each file. `L_V31V32` is derived from the V3.3 dict by shifting all loan indices down by 2 (since V3.1/V3.2 don't have P30/P31), so the two stay in lockstep if V3.3 is ever edited. V3.1's `NAF` values are normalized to `MKT` at parse time so downstream code doesn't need to special-case them.
+
+The layout specification PDFs are included in the repo for reference:
+- `mfplmon3_layout_v31.pdf`
+- `mfplmon3_layout_v32.pdf`
+- `mfplmon3_layout_v33.pdf`
+
+### URL routing (recent vs historical)
+
+Recent months live in GNMA's `data_bulk/` directory; older months are archived to `data_history_cons/`. The downloader tries `data_bulk/` first and automatically falls back to `data_history_cons/` (with URL-encoded backslash, since GNMA uses Windows path conventions internally). Each downloaded zip is validated by opening it and checking for a real mfplmon entry, so the ~4 KB HTML error pages GNMA returns when a file doesn't exist can no longer slip through as apparent successes.
 
 Downloaded files are cached in `gnma_mf_data/` and reused on subsequent runs. Only new months are downloaded.
 
 | Source | URL | Auth |
 |--------|-----|------|
 | Disclosure Data Download | `ginniemae.gov/.../datadownload_bulk.aspx` | Email + security Q |
-| Bulk File Server | `bulk.ginniemae.gov/protectedfiledownload.aspx` | Session cookie |
+| Bulk File Server (recent) | `bulk.ginniemae.gov/protectedfiledownload.aspx?dlfile=data_bulk/...` | Session cookie |
+| Bulk File Server (archive) | `bulk.ginniemae.gov/protectedfiledownload.aspx?dlfile=data_history_cons%5C...` | Session cookie |
 
 ## GNMA Authentication Details
 
@@ -228,14 +322,21 @@ After auth, cookies are transferred to a `requests.Session` for fast bulk downlo
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Main script: auth, download, parse, analytics, CSV output |
+| `main.py` | Main downloader/parser: auth, download, parse, analytics, CSV output |
+| `prepayment_analysis.py` | ML pipeline: empirical S-curves, XGBoost model, SHAP attribution |
+| `generate_report.py` | HTML report generator — reads `analysis_results.json`, writes `prepayment_report.html` |
+| `analysis_results.json` | Intermediate output of `prepayment_analysis.py` consumed by the report generator |
+| `prepayment_report.html` | Self-contained interactive report with S-curves, feature importance, and sample loan attributions |
 | `run.sh` | Shell wrapper: installs pip deps, checks Firefox, calls main.py |
 | `GnmaPlcRatesHistorical.csv` | Monthly GNMA PLC rates (bps) for refi incentive calculation |
 | `gnma_mf_raw_data_*.csv.gz` | Output: timestamped gzip-compressed enriched loan-month panel |
-| `requirements.txt` | Python dependencies: requests, pandas, numpy, playwright |
-| `.replit` | Replit Run button configuration (24 months) |
+| `mfplmon3_layout_v31.pdf` | GNMA layout specification for V3.1 (May 2022 – Feb 2023) |
+| `mfplmon3_layout_v32.pdf` | GNMA layout specification for V3.2 (Mar 2023 – May 2023) |
+| `mfplmon3_layout_v33.pdf` | GNMA layout specification for V3.3 (Jun 2023 – Present) |
+| `requirements.txt` | Python dependencies: requests, pandas, numpy, playwright, scikit-learn, xgboost, shap |
+| `.replit` | Replit Run button configuration (120 months) |
 | `replit.nix` | Nix system dependencies for Replit |
-| `.gitignore` | Excludes downloaded zip files, xlsx, and debug screenshots |
+| `.gitignore` | Excludes downloaded zip files, xlsx, debug screenshots, and Replit caches |
 
 ### Key functions in `main.py`
 
@@ -243,8 +344,11 @@ After auth, cookies are transferred to a `requests.Session` for fast bulk downlo
 |----------|-------------|
 | `discover_nix_libs()` | Finds NixOS library paths for Firefox (Replit-specific) |
 | `authenticate_gnma()` | Playwright Firefox auth flow, returns `requests.Session` with cookies |
-| `download_files()` | Downloads mfplmon3 zips using the authenticated session |
-| `read_mfplmon3()` | Parses V3.3 pipe-delimited file into list of dicts |
+| `_ensure_data_dir()` | Creates `gnma_mf_data/` if missing; emits a clear actionable error if the path exists as a file instead of a directory |
+| `_validate_mfplmon_zip()` | Opens a downloaded zip and verifies it contains a real mfplmon entry (catches the ~4 KB HTML error pages GNMA returns for missing files) |
+| `_attempt_download()` | Tries a single download URL and validates the result; shared by the primary + fallback URL attempts |
+| `download_files()` | Downloads mfplmon3 zips using the authenticated session, with `data_bulk/` → `data_history_cons/` fallback and a missing-period summary at the end |
+| `read_mfplmon3()` | Parses pipe-delimited file into list of dicts with V3.1 / V3.2 / V3.3 runtime dispatch |
 | `load_plc_rates()` | Reads `GnmaPlcRatesHistorical.csv`, returns monthly PLC rates in bps |
 | `parse_penalty_schedule()` | Parses declining penalty schedule from `prepay_desc` string |
 | `get_current_penalty_points()` | Looks up current penalty % based on year within penalty period |
@@ -272,9 +376,20 @@ nix-env -iA nixpkgs.nspr nixpkgs.nss nixpkgs.atk nixpkgs.cups \
 python3 -m playwright install firefox
 ```
 
-## Using the Output for S-Curve Analysis
+## Downstream Analysis
 
-The CSV contains everything needed to estimate a multifamily prepayment S-curve:
+The simplest path is the built-in ML pipeline described in [ML Prepayment Analysis](#ml-prepayment-analysis):
+
+```bash
+python3 prepayment_analysis.py   # trains XGBoost + SHAP
+python3 generate_report.py       # builds prepayment_report.html
+```
+
+These two scripts take the CSV output of `main.py` and produce a full set of S-curves, a calibrated XGBoost prepayment model, and an interactive HTML report with per-loan attribution. No additional code needed.
+
+### Rolling your own S-curves from the CSV
+
+If you'd rather build analytics yourself, the CSV has everything you need:
 
 1. **Filter** to `prepay_eligible = 1` (excludes lockout and construction loans)
 2. **Group** by `refi_incentive_bps` buckets (e.g., 25bps or 50bps bins)
@@ -297,11 +412,13 @@ age_months = (period_year - first_pay_year) * 12 + (period_month - first_pay_mon
 
 ## Known Limitations
 
-- **GNMA form field IDs are hardcoded** — the SharePoint web part GUID could change if GNMA redesigns their site. Fallback CSS selectors exist but haven't been tested against a redesign.
+- **History goes back to May 2022 (V3.1)** — the parser supports V3.1, V3.2, and V3.3 layouts, all under the `mfplmon3_*.zip` filename. Earlier periods use pre-V3.1 layouts (V2.0, V3.0) that this project does not parse. If you need data before May 2022, you'd need to add layout dicts for those older versions.
+- **GNMA form field IDs are hardcoded** — the SharePoint web part GUID could change if GNMA redesigns their site. Fallback CSS selectors exist but haven't been tested against a redesign. The auth flow also has an occasional cold-start race where Playwright's `fill()` runs before SharePoint JS has wired up the form; a plain retry almost always succeeds.
 - **Terminated pools not tracked** — pools where all loans prepay and the pool is removed entirely from mfplmon3 could be captured via the separate `mftermpools` file.
 - **PLC rate file needs periodic updates** — `GnmaPlcRatesHistorical.csv` must be updated with new monthly PLC rates as they are published.
 - **~14 loans (0.08%) have garbled `prepay_desc`** — penalty points are capped at 10 for these. Affected formats include period-delimited schedules (`10.9.8...`), typos creating concatenated numbers (`76` instead of `7,6`), and free-text narratives with embedded dates.
 - **CL/CS construction loan conversions** — when a CL pool converts to PN, the same case_number gets a new CUSIP. The CL disappearance is correctly excluded from prepayment counts, but the PN loan appears as a "new" loan with no prior history in the panel.
+- **`proj_loan_sec_rate` and `est_mtg_amount` are V3.3-only** — these CL/CS-specific pool fields don't exist in V3.1/V3.2, so rows from older months will have NaN in these columns. The prepayment analysis doesn't use them anyway (construction loans are excluded from `prepay_eligible`), so this is not a functional limitation.
 
 ## Changelog
 
@@ -319,3 +436,12 @@ age_months = (period_year - first_pay_year) * 12 + (period_month - first_pay_mon
 | 2026-04-09 | Gzipped output (.csv.gz) to stay under GitHub 100MB limit |
 | 2026-04-09 | Timestamped output filenames for run history |
 | 2026-04-09 | Expand to 24 months of history |
+| 2026-04-10 | Add ML prepayment analysis pipeline (`prepayment_analysis.py`, `generate_report.py`) — XGBoost + SHAP with interactive HTML report |
+| 2026-04-10 | `prepayment_analysis.py` auto-detects the most recent `gnma_mf_raw_data_*.csv.gz` (no hardcoded filename) |
+| 2026-04-10 | Add `_validate_mfplmon_zip()` to catch silent download failures (4 KB HTML error pages from GNMA) |
+| 2026-04-10 | Add `data_bulk/` → `data_history_cons/` URL fallback for historical months |
+| 2026-04-10 | Add V3.1 / V3.2 / V3.3 runtime-detected parsing with `NAF` → `MKT` normalization |
+| 2026-04-10 | Add `proj_loan_sec_rate` and `est_mtg_amount` to output CSV (NaN for V3.1/V3.2) |
+| 2026-04-10 | Add `_ensure_data_dir()` helper with clear error when `gnma_mf_data` exists as a file instead of a directory |
+| 2026-04-10 | Remove orphaned `download` and `gitignore` (missing-dot) files; add Replit cache dirs to `.gitignore` |
+| 2026-04-10 | Expand default to 120 months of history (maximum available back to V3.1 introduction) |
