@@ -3,3 +3,6 @@ gnma_mf_data/
 *.png
 __pycache__/
 *.pyc
+.pythonlibs/
+.upm/
+.cache/
