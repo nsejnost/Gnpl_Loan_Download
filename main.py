@@ -352,6 +352,42 @@ def _validate_mfplmon_zip(filepath):
         return False, f"validation error: {e}"
 
 
+def _ensure_data_dir(path):
+    """Ensure `path` exists and is a directory.
+
+    - If it does not exist, create it.
+    - If it exists and is a directory, do nothing.
+    - If it exists but is NOT a directory (e.g. a zero-byte file
+      accidentally created via a file-browser UI), print a clear
+      actionable error and SystemExit(1).
+
+    This wraps the footgun in os.makedirs(exist_ok=True), which still
+    raises FileExistsError when the path exists but is not a directory,
+    producing a cryptic traceback that doesn't explain the fix.
+    """
+    if os.path.isdir(path):
+        return
+    if os.path.exists(path):
+        # Path exists but isn't a directory — most likely a stray file
+        print()
+        print(f"[setup] ERROR: '{path}' exists but is not a directory.")
+        print(f"[setup]        Expected a directory to hold downloaded")
+        print(f"[setup]        mfplmon3 zip files.")
+        print(f"[setup]")
+        print(f"[setup]        This usually happens when a file with that")
+        print(f"[setup]        exact name was created by mistake (on Replit,")
+        print(f"[setup]        the 'New File' button is right next to")
+        print(f"[setup]        'New Folder').")
+        print(f"[setup]")
+        print(f"[setup]        To fix, remove or rename the offending path:")
+        print(f"[setup]          rm '{path}'")
+        print(f"[setup]        then re-run. The script will create the")
+        print(f"[setup]        directory itself.")
+        print()
+        raise SystemExit(1)
+    os.makedirs(path)
+
+
 def _attempt_download(session, url, dest, label):
     """Try a single download URL. Returns (success, reason).
 
@@ -388,7 +424,7 @@ def _attempt_download(session, url, dest, label):
 
 
 def download_files(session, months=6):
-    os.makedirs(DATA_DIR, exist_ok=True)
+    _ensure_data_dir(DATA_DIR)
     files = get_file_list(months)
     print(f"\n[download] Downloading {len(files)} files to {DATA_DIR}\n")
     downloaded = 0
@@ -834,7 +870,7 @@ def main():
     # Clear LD_LIBRARY_PATH (not strictly needed for CSV, but clean)
     os.environ.pop('LD_LIBRARY_PATH', None)
 
-    os.makedirs(DATA_DIR, exist_ok=True)
+    _ensure_data_dir(DATA_DIR)
     allf = sorted(glob.glob(os.path.join(DATA_DIR,"*.zip")) +
                   glob.glob(os.path.join(DATA_DIR,"*.txt")))
     if not allf:
